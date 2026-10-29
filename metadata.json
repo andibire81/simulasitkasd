@@ -1,0 +1,6 @@
+{
+  "name": "SIMULASI TKA SD — CBT ONLINE",
+  "description": "Sistem Computer Based Test (CBT) Online untuk simulasi Tes Kemampuan Akademik (TKA) siswa kelas VI Sekolah Dasar.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

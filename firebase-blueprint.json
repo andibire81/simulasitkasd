@@ -1,0 +1,583 @@
+{
+  "entities": {
+    "Admin": {
+      "title": "Admin",
+      "description": "Authorized CBT administrator or proctor authenticated via verified Google account.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 150 },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "createdBy": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "fullName", "createdBy", "createdAt", "updatedAt"]
+    },
+    "User": {
+      "title": "User",
+      "description": "Authenticated administrator user profile.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "participantNumber": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "className": { "type": "string", "minLength": 1, "maxLength": 30 },
+        "schoolName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 150 },
+        "role": { "type": "string", "enum": ["student", "admin"], "maxLength": 20 },
+        "accountStatus": { "type": "string", "enum": ["active", "inactive"], "maxLength": 20 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "uid",
+        "fullName",
+        "participantNumber",
+        "className",
+        "schoolName",
+        "email",
+        "role",
+        "accountStatus",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "StudentDirectory": {
+      "title": "StudentDirectory",
+      "description": "Master student roster managed by Admin (no student email required; students can sign in only after Admin registers their name and issues a token).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "normalizedName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "participantNumber": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "className": { "type": "string", "minLength": 1, "maxLength": 30 },
+        "schoolName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "tokenStatus": { "type": "string", "enum": ["issued", "withheld"], "maxLength": 20 },
+        "accountStatus": { "type": "string", "enum": ["active", "inactive"], "maxLength": 20 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "fullName",
+        "normalizedName",
+        "participantNumber",
+        "className",
+        "schoolName",
+        "tokenStatus",
+        "accountStatus",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CbtToken": {
+      "title": "CbtToken",
+      "description": "Classroom or per-student access token issued by Admin required for registered students to sign in.",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "minLength": 4, "maxLength": 16, "pattern": "^[A-Z0-9]+$" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "scope": { "type": "string", "enum": ["classroom", "student"], "maxLength": 20 },
+        "studentId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]*$" },
+        "active": { "type": "boolean" },
+        "createdBy": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "code",
+        "label",
+        "scope",
+        "studentId",
+        "active",
+        "createdBy",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CbtPortal": {
+      "title": "CbtPortal",
+      "description": "Published exam index allowing deterministic single-document lookup of active/scheduled exam IDs.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "examIds": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "examIds", "updatedAt"]
+    },
+    "StudentSession": {
+      "title": "StudentSession",
+      "description": "Cryptographic capability session minted when a student proves knowledge of an active Admin Token and an active StudentDirectory name.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 28, "maxLength": 80, "pattern": "^ses_[a-f0-9]+$" },
+        "studentId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "tokenCode": { "type": "string", "minLength": 4, "maxLength": 16, "pattern": "^[A-Z0-9]+$" },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "participantNumber": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "className": { "type": "string", "minLength": 1, "maxLength": 30 },
+        "schoolName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "expiresAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "studentId",
+        "tokenCode",
+        "fullName",
+        "participantNumber",
+        "className",
+        "schoolName",
+        "createdAt",
+        "expiresAt"
+      ]
+    },
+    "Question": {
+      "title": "Question",
+      "description": "CBT question extracted verbatim from official PDF source with admin verification flags.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "examPackId": { "type": "string", "minLength": 1, "maxLength": 80, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "originalNumber": { "type": "integer" },
+        "displayOrder": { "type": "integer" },
+        "subject": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "questionType": {
+          "type": "string",
+          "enum": ["single_choice", "multiple_choice_complex", "true_false", "unsupported"],
+          "maxLength": 40
+        },
+        "stemText": { "type": "string", "minLength": 1, "maxLength": 8000 },
+        "instructionText": { "type": "string", "maxLength": 500 },
+        "options": { "type": "array" },
+        "statements": { "type": "array" },
+        "imageUrls": { "type": "array" },
+        "postImageText": { "type": "string", "maxLength": 4000 },
+        "secondaryImageUrls": { "type": "array" },
+        "postSecondaryImageText": { "type": "string", "maxLength": 2000 },
+        "optionHasImages": { "type": "boolean" },
+        "lockOptionOrder": { "type": "boolean" },
+        "sourcePdfName": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "sourcePdfUrl": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "sourcePage": { "type": "integer" },
+        "sourcePageEnd": { "type": "integer" },
+        "sourcePagePreviewUrl": { "type": "string", "maxLength": 500 },
+        "weight": { "type": "number" },
+        "textVerified": { "type": "boolean" },
+        "imageVerified": { "type": "boolean" },
+        "verificationStatus": {
+          "type": "string",
+          "enum": ["unverified", "verified", "needs_revision"],
+          "maxLength": 30
+        },
+        "answerKeyVerified": { "type": "boolean" },
+        "verificationNotes": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "examPackId",
+        "originalNumber",
+        "displayOrder",
+        "subject",
+        "questionType",
+        "stemText",
+        "instructionText",
+        "options",
+        "statements",
+        "imageUrls",
+        "postImageText",
+        "secondaryImageUrls",
+        "postSecondaryImageText",
+        "optionHasImages",
+        "lockOptionOrder",
+        "sourcePdfName",
+        "sourcePdfUrl",
+        "sourcePage",
+        "sourcePageEnd",
+        "sourcePagePreviewUrl",
+        "weight",
+        "textVerified",
+        "imageVerified",
+        "verificationStatus",
+        "answerKeyVerified",
+        "verificationNotes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AnswerKey": {
+      "title": "AnswerKey",
+      "description": "Confidential answer key and scoring rule strictly restricted to Admins.",
+      "type": "object",
+      "properties": {
+        "questionId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "examPackId": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "questionType": {
+          "type": "string",
+          "enum": ["single_choice", "multiple_choice_complex", "true_false", "unsupported"],
+          "maxLength": 40
+        },
+        "correctOptionId": { "type": "string", "maxLength": 40 },
+        "correctOptionIds": { "type": "array" },
+        "statementKeys": { "type": "object" },
+        "complexScoringRule": {
+          "type": "string",
+          "enum": ["all_exact", "partial_no_penalty"],
+          "maxLength": 40
+        },
+        "wrongScore": { "type": "number" },
+        "weight": { "type": "number" },
+        "discussion": { "type": "string", "maxLength": 4000 },
+        "verified": { "type": "boolean" },
+        "locked": { "type": "boolean" },
+        "verifiedBy": { "type": "string", "minLength": 1, "maxLength": 150 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "questionId",
+        "examPackId",
+        "questionType",
+        "correctOptionId",
+        "correctOptionIds",
+        "statementKeys",
+        "complexScoringRule",
+        "wrongScore",
+        "weight",
+        "discussion",
+        "verified",
+        "locked",
+        "verifiedBy",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Exam": {
+      "title": "Exam",
+      "description": "Scheduled CBT exam session configuration.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "subject": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "targetClass": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "examPackId": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "questionIds": { "type": "array" },
+        "questionCount": { "type": "integer" },
+        "durationMinutes": { "type": "integer" },
+        "scheduledStart": { "type": "string", "format": "date-time" },
+        "scheduledEnd": { "type": "string", "format": "date-time" },
+        "status": {
+          "type": "string",
+          "enum": ["draft", "waiting", "active", "finished", "archived"],
+          "maxLength": 30
+        },
+        "allowRetake": { "type": "boolean" },
+        "shuffleQuestions": { "type": "boolean" },
+        "shuffleOptions": { "type": "boolean" },
+        "showDiscussion": { "type": "boolean" },
+        "publishScore": { "type": "boolean" },
+        "sourcePdfName": { "type": "string", "maxLength": 200 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "title",
+        "description",
+        "subject",
+        "targetClass",
+        "examPackId",
+        "questionIds",
+        "questionCount",
+        "durationMinutes",
+        "scheduledStart",
+        "scheduledEnd",
+        "status",
+        "allowRetake",
+        "shuffleQuestions",
+        "shuffleOptions",
+        "showDiscussion",
+        "publishScore",
+        "sourcePdfName",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Attempt": {
+      "title": "Attempt",
+      "description": "Student exam attempt bound to an active StudentDirectory record and StudentSession capability.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "examId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "examTitle": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "subject": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "studentUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "sessionId": { "type": "string", "minLength": 28, "maxLength": 80, "pattern": "^ses_[a-f0-9]+$" },
+        "studentName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "participantNumber": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "className": { "type": "string", "minLength": 1, "maxLength": 30 },
+        "schoolName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "questionOrder": { "type": "array" },
+        "totalQuestions": { "type": "integer" },
+        "durationMinutes": { "type": "integer" },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "submittedAt": { "type": "string", "format": "date-time" },
+        "status": {
+          "type": "string",
+          "enum": ["in_progress", "submitted", "expired_submitted"],
+          "maxLength": 30
+        },
+        "answeredCount": { "type": "integer" },
+        "unansweredCount": { "type": "integer" },
+        "flaggedCount": { "type": "integer" },
+        "publishedFinalScore": { "type": "number" },
+        "publishedRawScore": { "type": "number" },
+        "publishedMaxScore": { "type": "number" },
+        "publishedCorrectCount": { "type": "integer" },
+        "publishedWrongCount": { "type": "integer" },
+        "scorePublished": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "examId",
+        "examTitle",
+        "subject",
+        "studentUid",
+        "sessionId",
+        "studentName",
+        "participantNumber",
+        "className",
+        "schoolName",
+        "questionOrder",
+        "totalQuestions",
+        "durationMinutes",
+        "startedAt",
+        "expiresAt",
+        "submittedAt",
+        "status",
+        "answeredCount",
+        "unansweredCount",
+        "flaggedCount",
+        "publishedFinalScore",
+        "publishedRawScore",
+        "publishedMaxScore",
+        "publishedCorrectCount",
+        "publishedWrongCount",
+        "scorePublished",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Response": {
+      "title": "Response",
+      "description": "Capability-keyed student answer document inside an Attempt subcollection.",
+      "type": "object",
+      "properties": {
+        "attemptId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "questionId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "examId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "studentUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "sessionId": { "type": "string", "minLength": 28, "maxLength": 80, "pattern": "^ses_[a-f0-9]+$" },
+        "questionType": {
+          "type": "string",
+          "enum": ["single_choice", "multiple_choice_complex", "true_false", "unsupported"],
+          "maxLength": 40
+        },
+        "selectedOptionId": { "type": "string", "maxLength": 40 },
+        "selectedOptionIds": { "type": "array" },
+        "statementAnswers": { "type": "object" },
+        "flaggedForReview": { "type": "boolean" },
+        "clientSequence": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "attemptId",
+        "questionId",
+        "examId",
+        "studentUid",
+        "sessionId",
+        "questionType",
+        "selectedOptionId",
+        "selectedOptionIds",
+        "statementAnswers",
+        "flaggedForReview",
+        "clientSequence",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ExamGrade": {
+      "title": "ExamGrade",
+      "description": "Confidential grading computation restricted to Admins.",
+      "type": "object",
+      "properties": {
+        "attemptId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "examId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "studentUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "correctCount": { "type": "integer" },
+        "wrongCount": { "type": "integer" },
+        "unansweredCount": { "type": "integer" },
+        "rawScore": { "type": "number" },
+        "maxScore": { "type": "number" },
+        "finalScore": { "type": "number" },
+        "gradingStatus": {
+          "type": "string",
+          "enum": ["graded_complete", "graded_partial", "ungraded_missing_keys"],
+          "maxLength": 40
+        },
+        "unverifiedKeyCount": { "type": "integer" },
+        "gradedBy": { "type": "string", "minLength": 1, "maxLength": 150 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "attemptId",
+        "examId",
+        "studentUid",
+        "correctCount",
+        "wrongCount",
+        "unansweredCount",
+        "rawScore",
+        "maxScore",
+        "finalScore",
+        "gradingStatus",
+        "unverifiedKeyCount",
+        "gradedBy",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Asset": {
+      "title": "Asset",
+      "description": "Original PDF page render or visual crop metadata.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "examPackId": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "questionNumber": { "type": "integer" },
+        "assetType": {
+          "type": "string",
+          "enum": ["pdf_source", "page_render", "question_crop", "option_crop"],
+          "maxLength": 30
+        },
+        "url": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "sourcePdfName": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "sourcePage": { "type": "integer" },
+        "width": { "type": "integer" },
+        "height": { "type": "integer" },
+        "verified": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "examPackId",
+        "questionNumber",
+        "assetType",
+        "url",
+        "sourcePdfName",
+        "sourcePage",
+        "width",
+        "height",
+        "verified",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable administrative activity audit trail.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "actorUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "actorEmail": { "type": "string", "format": "email", "minLength": 3, "maxLength": 150 },
+        "action": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "targetType": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "targetId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "actorUid",
+        "actorEmail",
+        "action",
+        "targetType",
+        "targetId",
+        "summary",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/Admin" },
+      "description": "Authorized CBT administrators."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Administrator user profiles."
+    },
+    "/studentDirectory/{registryId}": {
+      "schema": { "$ref": "#/entities/StudentDirectory" },
+      "description": "Master student list managed by Admin (students authenticate with Name + Token)."
+    },
+    "/cbtTokens/{tokenCode}": {
+      "schema": { "$ref": "#/entities/CbtToken" },
+      "description": "Active/inactive classroom access tokens managed by Admin."
+    },
+    "/cbtPortal/{docId}": {
+      "schema": { "$ref": "#/entities/CbtPortal" },
+      "description": "Published exam IDs index."
+    },
+    "/studentSessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/StudentSession" },
+      "description": "Capability-keyed student sessions verified against active cbtTokens and studentDirectory."
+    },
+    "/questions/{questionId}": {
+      "schema": { "$ref": "#/entities/Question" },
+      "description": "CBT question bank."
+    },
+    "/answerKeys/{questionId}": {
+      "schema": { "$ref": "#/entities/AnswerKey" },
+      "description": "Confidential answer keys (Admin-only)."
+    },
+    "/exams/{examId}": {
+      "schema": { "$ref": "#/entities/Exam" },
+      "description": "CBT exam schedules and settings."
+    },
+    "/attempts/{attemptId}": {
+      "schema": { "$ref": "#/entities/Attempt" },
+      "description": "Student exam attempts."
+    },
+    "/attempts/{attemptId}/responses/{responseId}": {
+      "schema": { "$ref": "#/entities/Response" },
+      "description": "Capability-keyed per-question student responses."
+    },
+    "/examGrades/{attemptId}": {
+      "schema": { "$ref": "#/entities/ExamGrade" },
+      "description": "Confidential grading records (Admin-only)."
+    },
+    "/assets/{assetId}": {
+      "schema": { "$ref": "#/entities/Asset" },
+      "description": "PDF page renders and cropped visual assets."
+    },
+    "/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Immutable admin audit log."
+    }
+  }
+}
