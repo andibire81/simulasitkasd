@@ -7,31 +7,10 @@ import {
   setDoc,
   serverTimestamp,
 } from 'firebase/firestore';
-import firebaseAppletConfig from '../../firebase-applet-config.json';
+import firebaseConfig from '../../firebase-applet-config.json';
 import { clampStr, ExamRecord, ExamStatus, sanitizeId } from '../types/cbt';
 
 export const BOOTSTRAPPED_ADMIN_EMAIL = 'andibire81@guru.sd.belajar.id';
-
-const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env || {};
-
-const firebaseConfig = {
-  ...firebaseAppletConfig,
-  apiKey: env.VITE_FIREBASE_API_KEY || firebaseAppletConfig.apiKey,
-  authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || firebaseAppletConfig.authDomain,
-  projectId: env.VITE_FIREBASE_PROJECT_ID || firebaseAppletConfig.projectId,
-  storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || firebaseAppletConfig.storageBucket,
-  messagingSenderId:
-    env.VITE_FIREBASE_MESSAGING_SENDER_ID || firebaseAppletConfig.messagingSenderId,
-  appId: env.VITE_FIREBASE_APP_ID || firebaseAppletConfig.appId,
-  firestoreDatabaseId:
-    env.VITE_FIREBASE_FIRESTORE_DATABASE_ID || firebaseAppletConfig.firestoreDatabaseId,
-};
-
-export const FIREBASE_PROJECT_ID = firebaseConfig.projectId || '';
-export const FIREBASE_AUTH_DOMAIN = firebaseConfig.authDomain || '';
-export const FIREBASE_CONSOLE_AUTH_SETTINGS_URL = FIREBASE_PROJECT_ID
-  ? `https://console.firebase.google.com/project/${encodeURIComponent(FIREBASE_PROJECT_ID)}/authentication/settings`
-  : 'https://console.firebase.google.com/';
 
 export const isFirebaseConfigured = Boolean(
   firebaseConfig &&
