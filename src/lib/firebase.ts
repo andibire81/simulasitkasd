@@ -138,7 +138,7 @@ export async function syncPublishedExamsPortalIndex(exams: ExamRecord[]): Promis
         ex.status === ExamStatus.FINISHED
     )
     .map((ex) => ex.id)
-    .slice(0, 50);
+    .slice(0, 500);
 
   const path = 'cbtPortal/publishedExams';
   try {

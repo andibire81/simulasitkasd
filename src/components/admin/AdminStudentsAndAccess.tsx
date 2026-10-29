@@ -2,22 +2,26 @@ import React, { useMemo, useState } from 'react';
 import {
   deleteDoc,
   doc,
+  getDoc,
   serverTimestamp,
   setDoc,
   updateDoc,
   writeBatch,
 } from 'firebase/firestore';
 import {
+  Building2,
   Check,
   CheckCircle2,
   Copy,
   FileSpreadsheet,
   History,
   KeyRound,
+  Link2,
   Plus,
   Printer,
   RefreshCw,
   Search,
+  Share2,
   Shield,
   Trash2,
   UserCheck,
@@ -35,12 +39,15 @@ import {
 } from '../../lib/firebase';
 import {
   AdminRecord,
+  AdminRegistrationMode,
+  AdminRegistrationSettingsRecord,
   AttemptRecord,
   AuditLogRecord,
   CbtTokenRecord,
   clampStr,
-  computeStudentDocId,
+  computeStudentDocIdForSchool,
   generateRandomTokenCode,
+  normalizeSchoolName,
   normalizeStudentName,
   StudentDirectoryRecord,
   UserProfile,
@@ -52,10 +59,15 @@ interface AdminStudentsAndAccessProps {
   activeSubTab: 'students' | 'access_settings' | 'audit_logs';
   users: UserProfile[];
   studentDirectory: StudentDirectoryRecord[];
+  allStudentDirectory?: StudentDirectoryRecord[];
   tokens: CbtTokenRecord[];
   admins: AdminRecord[];
   attempts: AttemptRecord[];
   auditLogs: AuditLogRecord[];
+  adminSchoolName?: string;
+  isSuperAdmin?: boolean;
+  selectedSchoolFilter?: string;
+  registrationSettings?: AdminRegistrationSettingsRecord;
 }
 
 function formatTimestamp(ts?: { toDate?: () => Date }): string {
@@ -87,11 +99,18 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
   activeSubTab,
   users,
   studentDirectory,
+  allStudentDirectory,
   tokens,
   admins,
   attempts,
   auditLogs,
+  adminSchoolName = 'Penyelenggara TKA SD',
+  isSuperAdmin = false,
+  selectedSchoolFilter = 'ALL',
+  registrationSettings,
 }) => {
+  const globalStudents = allStudentDirectory || studentDirectory;
+
   // Student Form State (Name + Token issued by Admin — no email)
   const [showStudentModal, setShowStudentModal] = useState(false);
   const [editingRow, setEditingRow] = useState<StudentDirectoryRecord | null>(null);
@@ -124,23 +143,85 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
   const [csvAutoIssueToken, setCsvAutoIssueToken] = useState(true);
   const [csvBusy, setCsvBusy] = useState(false);
 
-  // Access Settings State
+  // Access Settings & Multi-School Registration State
   const [selectedPromoteUid, setSelectedPromoteUid] = useState('');
+  const [promoteSchoolName, setPromoteSchoolName] = useState('');
   const [confirmRevokeAdmin, setConfirmRevokeAdmin] = useState<AdminRecord | null>(null);
+  const [regModeDraft, setRegModeDraft] = useState<AdminRegistrationMode>(
+    registrationSettings?.mode || 'open'
+  );
+  const [welcomeNoteDraft, setWelcomeNoteDraft] = useState<string>(
+    registrationSettings?.welcomeNote ||
+      'Terbuka bagi Guru Kelas VI, Proktor CBT, dan Operator Sekolah Dasar untuk menyelenggarakan simulasi TKA SD di sekolah masing-masing.'
+  );
+  const [savingRegSettings, setSavingRegSettings] = useState(false);
+  const [copiedShareLink, setCopiedShareLink] = useState<'link' | 'wa' | null>(null);
 
-  // Audit Log Search
-  const [logSearch, setLogSearch] = useState('');
+  // Self-profile edit state for School Admins
+  const myAdminDoc = useMemo(
+    () => admins.find((a) => a.uid === auth.currentUser?.uid) || null,
+    [admins]
+  );
+  const [myFullNameDraft, setMyFullNameDraft] = useState('');
+  const [mySchoolDraft, setMySchoolDraft] = useState('');
+  const [myPositionDraft, setMyPositionDraft] = useState('');
+  const [editingMyProfile, setEditingMyProfile] = useState(false);
+
+  React.useEffect(() => {
+    if (registrationSettings) {
+      setRegModeDraft(registrationSettings.mode);
+      setWelcomeNoteDraft(registrationSettings.welcomeNote || '');
+    }
+  }, [registrationSettings?.mode, registrationSettings?.welcomeNote]);
 
   // Token Lookup Maps
-  const activeClassroomToken = useMemo(() => {
-    return (
-      tokens.find((t) => (!t.scope || t.scope === 'classroom') && t.active) || null
+  const getActiveClassroomTokenForSchool = (stuSchoolName: string) => {
+    const schoolClassroom = tokens.find(
+      (t) =>
+        (!t.scope || t.scope === 'classroom') &&
+        t.active &&
+        Boolean(t.schoolName) &&
+        t.schoolName !== 'Semua' &&
+        normalizeSchoolName(t.schoolName || '') === normalizeSchoolName(stuSchoolName)
     );
-  }, [tokens]);
+    if (schoolClassroom) return schoolClassroom;
+    return (
+      tokens.find(
+        (t) =>
+          (!t.scope || t.scope === 'classroom') &&
+          t.active &&
+          (!t.schoolName ||
+            t.schoolName === 'Semua' ||
+            (t.schoolName === 'Penyelenggara TKA SD' &&
+              stuSchoolName === 'Penyelenggara TKA SD'))
+      ) || null
+    );
+  };
+
+  const activeClassroomToken = useMemo(() => {
+    const targetSchool =
+      isSuperAdmin && selectedSchoolFilter === 'ALL'
+        ? 'Semua'
+        : isSuperAdmin
+        ? selectedSchoolFilter
+        : adminSchoolName;
+    if (targetSchool === 'Semua') {
+      return (
+        tokens.find(
+          (t) =>
+            (!t.scope || t.scope === 'classroom') &&
+            t.active &&
+            (!t.schoolName ||
+              t.schoolName === 'Semua' ||
+              t.schoolName === 'Penyelenggara TKA SD')
+        ) || null
+      );
+    }
+    return getActiveClassroomTokenForSchool(targetSchool);
+  }, [tokens, isSuperAdmin, selectedSchoolFilter, adminSchoolName]);
 
   const personalTokenByStudentId = useMemo(() => {
     const map = new Map<string, CbtTokenRecord>();
-    // Prefer active personal token if multiple exist for same studentId
     for (const t of tokens) {
       if (t.scope === 'student' && t.studentId) {
         const existing = map.get(t.studentId);
@@ -179,10 +260,11 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
         personal,
       };
     }
-    if (activeClassroomToken) {
+    const matchingClassroom = getActiveClassroomTokenForSchool(row.schoolName);
+    if (matchingClassroom) {
       return {
         ready: true,
-        code: activeClassroomToken.code,
+        code: matchingClassroom.code,
         sourceLabel: 'Token Kelas',
         personal,
       };
@@ -243,13 +325,23 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
     activeClassroomToken,
   ]);
 
+  // Audit Log Search
+  const [logSearch, setLogSearch] = useState('');
+
   const openCreateStudent = () => {
     const used = new Set(tokens.map((t) => t.code));
+    const defaultSchool = !isSuperAdmin
+      ? adminSchoolName
+      : selectedSchoolFilter !== 'ALL'
+      ? selectedSchoolFilter
+      : adminSchoolName && adminSchoolName !== 'Penyelenggara TKA SD'
+      ? adminSchoolName
+      : 'SD Negeri 1';
     setEditingRow(null);
     setFullName('');
     setParticipantNumber('');
     setClassName('VI-A');
-    setSchoolName('SD Negeri');
+    setSchoolName(defaultSchool);
     setTokenMode('issue_now');
     setPersonalTokenCode(generateUniqueStudentToken(used));
     setFeedback(null);
@@ -312,7 +404,16 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
       return;
     }
 
-    const computedId = computeStudentDocId(cleanName);
+    const effectiveSchool = isSuperAdmin
+      ? cleanSchool
+      : clampStr(adminSchoolName || cleanSchool, VALIDATION_BOUNDS.SCHOOL_MAX_LEN);
+
+    const computedId =
+      editingRow &&
+      normalizeStudentName(editingRow.fullName) === cleanNorm &&
+      normalizeSchoolName(editingRow.schoolName) === normalizeSchoolName(effectiveSchool)
+        ? editingRow.id
+        : computeStudentDocIdForSchool(cleanName, effectiveSchool);
 
     // Check token collision against other students or classroom tokens
     if (tokenMode === 'issue_now' && cleanPersonalCode) {
@@ -327,7 +428,7 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
       if (collidingToken) {
         setFeedback({
           type: 'err',
-          text: `Kode token "${cleanPersonalCode}" sudah digunakan. Klik Acak Kode Baru untuk membuat kode lain.`,
+          text: `Kode token "${cleanPersonalCode}" sudah digunakan. Klik Acak Kode untuk membuat kode lain.`,
         });
         return;
       }
@@ -343,11 +444,11 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
 
       if (editingRow) {
         if (computedId !== editingRow.id) {
-          const duplicate = studentDirectory.find((d) => d.id === computedId);
+          const duplicate = globalStudents.find((d) => d.id === computedId);
           if (duplicate) {
             setFeedback({
               type: 'err',
-              text: `Nama "${cleanName}" sudah terdaftar pada daftar peserta. Tambahkan pembeda (misal inisial atau kelas) agar nama siswa unik saat masuk.`,
+              text: `Nama "${cleanName}" sudah terdaftar pada daftar peserta sekolah ini. Tambahkan pembeda (misal inisial atau kelas) agar nama siswa unik saat masuk.`,
             });
             setFormBusy(false);
             return;
@@ -359,9 +460,10 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
             normalizedName: cleanNorm,
             participantNumber: cleanNum,
             className: cleanClass,
-            schoolName: cleanSchool,
+            schoolName: effectiveSchool,
             tokenStatus: nextTokenStatus,
             accountStatus: editingRow.accountStatus,
+            createdBy: editingRow.createdBy || adminUid,
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           });
@@ -372,7 +474,7 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
             normalizedName: cleanNorm,
             participantNumber: cleanNum,
             className: cleanClass,
-            schoolName: cleanSchool,
+            schoolName: effectiveSchool,
             tokenStatus: nextTokenStatus,
             accountStatus: editingRow.accountStatus,
             updatedAt: serverTimestamp(),
@@ -391,7 +493,7 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
           }
         }
       } else {
-        const duplicate = studentDirectory.find((d) => d.id === computedId);
+        const duplicate = globalStudents.find((d) => d.id === computedId);
         if (duplicate) {
           setFeedback({
             type: 'err',
@@ -407,9 +509,10 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
           normalizedName: cleanNorm,
           participantNumber: cleanNum,
           className: cleanClass,
-          schoolName: cleanSchool,
+          schoolName: effectiveSchool,
           tokenStatus: nextTokenStatus,
           accountStatus: 'active',
+          createdBy: adminUid,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
@@ -422,6 +525,7 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
             label: clampStr(`Token Peserta CBT (${cleanNum})`, 120),
             scope: 'student',
             studentId: computedId,
+            schoolName: effectiveSchool,
             active: true,
             updatedAt: serverTimestamp(),
           });
@@ -431,6 +535,7 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
             label: clampStr(`Token Peserta CBT (${cleanNum})`, 120),
             scope: 'student',
             studentId: computedId,
+            schoolName: effectiveSchool,
             active: true,
             createdBy: adminUid,
             createdAt: serverTimestamp(),
@@ -501,6 +606,7 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
             label: clampStr(st.label || `Token Peserta CBT (${row.participantNumber})`, 120),
             scope: 'student',
             studentId: row.id,
+            schoolName: clampStr(row.schoolName, 120),
             active: false,
             updatedAt: serverTimestamp(),
           });
@@ -539,6 +645,7 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
             label: clampStr(`Token Peserta CBT (${row.participantNumber})`, 120),
             scope: 'student',
             studentId: row.id,
+            schoolName: clampStr(row.schoolName, 120),
             active: true,
             updatedAt: serverTimestamp(),
           });
@@ -549,6 +656,7 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
             label: clampStr(`Token Peserta CBT (${row.participantNumber})`, 120),
             scope: 'student',
             studentId: row.id,
+            schoolName: clampStr(row.schoolName, 120),
             active: true,
             createdBy: adminUid,
             createdAt: serverTimestamp(),
@@ -612,6 +720,7 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
             label: clampStr(`Token Peserta CBT (${stu.participantNumber})`, 120),
             scope: 'student',
             studentId: stu.id,
+            schoolName: clampStr(stu.schoolName, 120),
             active: true,
             updatedAt: serverTimestamp(),
           });
@@ -622,6 +731,7 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
             label: clampStr(`Token Peserta CBT (${stu.participantNumber})`, 120),
             scope: 'student',
             studentId: stu.id,
+            schoolName: clampStr(stu.schoolName, 120),
             active: true,
             createdBy: adminUid,
             createdAt: serverTimestamp(),
@@ -762,10 +872,10 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
       ) {
         continue; // skip header row
       }
-      if (cols.length < 4) {
+      if (cols.length < 3) {
         setFeedback({
           type: 'err',
-          text: `Baris ke-${i + 1} kurang lengkap. Gunakan format: nomor_peserta,nama_lengkap,kelas,sekolah[,token_opsional]`,
+          text: `Baris ke-${i + 1} kurang lengkap. Gunakan format: nomor_peserta,nama_lengkap,kelas[,sekolah,token_opsional]`,
         });
         return;
       }
@@ -776,13 +886,17 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
       );
       const normName = normalizeStudentName(fName);
       const cls = clampStr(cols[2], VALIDATION_BOUNDS.CLASS_MAX_LEN);
-      const sch = clampStr(cols[3], VALIDATION_BOUNDS.SCHOOL_MAX_LEN);
+      const rawSchCol = cols[3] || adminSchoolName;
+      const sch = clampStr(
+        isSuperAdmin ? rawSchCol : adminSchoolName || rawSchCol,
+        VALIDATION_BOUNDS.SCHOOL_MAX_LEN
+      );
       const optToken = (cols[4] || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 
       if (!pNum || !fName || !normName || !cls || !sch) {
         setFeedback({
           type: 'err',
-          text: `Data tidak valid pada baris ke-${i + 1} (${raw}). Pastikan nomor peserta, nama lengkap, kelas, dan sekolah terisi.`,
+          text: `Data tidak valid pada baris ke-${i + 1} (${raw}). Pastikan nomor peserta, nama lengkap, dan kelas terisi.`,
         });
         return;
       }
@@ -798,7 +912,7 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
         return;
       }
 
-      const id = computeStudentDocId(fName);
+      const id = computeStudentDocIdForSchool(fName, sch);
       parsedById.set(id, {
         id,
         participantNumber: pNum,
@@ -819,7 +933,7 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
     setCsvBusy(true);
     setFeedback(null);
     try {
-      const existingById = new Map(studentDirectory.map((d) => [d.id, d]));
+      const existingById = new Map(globalStudents.map((d) => [d.id, d]));
       const usedCodes = new Set(tokens.map((t) => t.code));
       const batch = writeBatch(db);
 
@@ -850,6 +964,7 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
             schoolName: item.schoolName,
             tokenStatus: nextTokenStatus,
             accountStatus: 'active',
+            createdBy: adminUid,
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           });
@@ -872,6 +987,7 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
               label: clampStr(`Token Peserta CBT (${item.participantNumber})`, 120),
               scope: 'student',
               studentId: item.id,
+              schoolName: item.schoolName,
               active: true,
               updatedAt: serverTimestamp(),
             });
@@ -881,6 +997,7 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
               label: clampStr(`Token Peserta CBT (${item.participantNumber})`, 120),
               scope: 'student',
               studentId: item.id,
+              schoolName: item.schoolName,
               active: true,
               createdBy: adminUid,
               createdAt: serverTimestamp(),
@@ -924,11 +1041,16 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
     reader.readAsText(file, 'utf-8');
   };
 
-  // Promote existing verified teacher Google account to Admin
+  // Promote existing verified teacher Google account to Admin (Super Admin)
   const handlePromoteToAdmin = async () => {
     const targetUser = users.find((u) => u.uid === selectedPromoteUid);
     const currentUid = auth.currentUser?.uid;
     if (!targetUser || !currentUid) return;
+
+    const assignedSchool = clampStr(
+      promoteSchoolName || targetUser.schoolName || 'SD Negeri',
+      VALIDATION_BOUNDS.SCHOOL_MAX_LEN
+    );
 
     setFormBusy(true);
     setFeedback(null);
@@ -937,6 +1059,9 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
         uid: targetUser.uid,
         email: clampStr(targetUser.email, VALIDATION_BOUNDS.EMAIL_MAX_LEN),
         fullName: clampStr(targetUser.fullName, VALIDATION_BOUNDS.NAME_MAX_LEN),
+        schoolName: assignedSchool,
+        position: 'Admin CBT Sekolah',
+        status: 'active',
         createdBy: currentUid,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
@@ -944,8 +1069,8 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
       await updateDoc(doc(db, 'users', targetUser.uid), {
         fullName: targetUser.fullName,
         participantNumber: targetUser.participantNumber,
-        className: targetUser.className,
-        schoolName: targetUser.schoolName,
+        className: 'ADMIN',
+        schoolName: assignedSchool,
         email: targetUser.email,
         role: 'admin',
         accountStatus: 'active',
@@ -955,15 +1080,156 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
         action: 'GRANT_ADMIN_ROLE',
         targetType: 'admins',
         targetId: targetUser.uid,
-        summary: `Memberikan hak akses Administrator kepada ${targetUser.fullName} (${targetUser.email})`,
+        summary: `Memberikan hak akses Administrator kepada ${targetUser.fullName} (${assignedSchool} · ${targetUser.email})`,
       });
       setSelectedPromoteUid('');
+      setPromoteSchoolName('');
       setFeedback({
         type: 'ok',
-        text: `${targetUser.fullName} (${targetUser.email}) kini memiliki hak akses Administrator.`,
+        text: `${targetUser.fullName} (${assignedSchool}) kini aktif sebagai Administrator.`,
       });
     } catch (error) {
       handleFirestoreError(error, OperationType.CREATE, `admins/${targetUser.uid}`);
+    } finally {
+      setFormBusy(false);
+    }
+  };
+
+  const handleSetAdminStatus = async (
+    adm: AdminRecord,
+    nextStatus: 'active' | 'suspended'
+  ) => {
+    setFormBusy(true);
+    setFeedback(null);
+    try {
+      await updateDoc(doc(db, 'admins', adm.uid), {
+        status: nextStatus,
+        updatedAt: serverTimestamp(),
+      });
+      const existingUser = users.find((u) => u.uid === adm.uid);
+      if (existingUser) {
+        await updateDoc(doc(db, 'users', adm.uid), {
+          fullName: existingUser.fullName,
+          participantNumber: existingUser.participantNumber,
+          className: nextStatus === 'active' ? 'ADMIN' : existingUser.className,
+          schoolName: adm.schoolName || existingUser.schoolName,
+          email: existingUser.email,
+          role: nextStatus === 'active' ? 'admin' : 'student',
+          accountStatus: existingUser.accountStatus,
+          updatedAt: serverTimestamp(),
+        });
+      }
+      await recordAuditLog({
+        action: nextStatus === 'active' ? 'APPROVE_SCHOOL_ADMIN' : 'SUSPEND_SCHOOL_ADMIN',
+        targetType: 'admins',
+        targetId: adm.uid,
+        summary: `${
+          nextStatus === 'active' ? 'Menyetujui/mengaktifkan' : 'Menonaktifkan'
+        } Admin Sekolah ${adm.fullName} (${adm.schoolName || '-'} · ${adm.email})`,
+      });
+      setFeedback({
+        type: 'ok',
+        text:
+          nextStatus === 'active'
+            ? `Akun Admin ${adm.fullName} (${adm.schoolName || 'Sekolah'}) telah disetujui dan aktif.`
+            : `Akun Admin ${adm.fullName} telah dinonaktifkan sementara.`,
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `admins/${adm.uid}`);
+    } finally {
+      setFormBusy(false);
+    }
+  };
+
+  const handleSaveRegistrationSettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const actorEmail =
+      auth.currentUser?.email || BOOTSTRAPPED_ADMIN_EMAIL;
+    setSavingRegSettings(true);
+    setFeedback(null);
+    try {
+      const regRef = doc(db, 'adminSettings', 'registration');
+      const snap = await getDoc(regRef);
+      const cleanNote = clampStr(
+        welcomeNoteDraft,
+        VALIDATION_BOUNDS.WELCOME_NOTE_MAX_LEN
+      );
+      if (snap.exists()) {
+        await updateDoc(regRef, {
+          mode: regModeDraft,
+          welcomeNote: cleanNote,
+          updatedBy: clampStr(actorEmail, VALIDATION_BOUNDS.EMAIL_MAX_LEN),
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        await setDoc(regRef, {
+          id: 'registration',
+          mode: regModeDraft,
+          welcomeNote: cleanNote,
+          updatedBy: clampStr(actorEmail, VALIDATION_BOUNDS.EMAIL_MAX_LEN),
+          updatedAt: serverTimestamp(),
+        });
+      }
+      await recordAuditLog({
+        action: 'UPDATE_ADMIN_REGISTRATION_MODE',
+        targetType: 'adminSettings',
+        targetId: 'registration',
+        summary: `Mengubah kebijakan pendaftaran Admin Sekolah menjadi "${regModeDraft.toUpperCase()}"`,
+      });
+      setFeedback({
+        type: 'ok',
+        text: 'Pengaturan kemudahan pendaftaran Admin Sekolah berhasil disimpan.',
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'adminSettings/registration');
+    } finally {
+      setSavingRegSettings(false);
+    }
+  };
+
+  const handleSaveMySchoolProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const uid = auth.currentUser?.uid;
+    if (!uid || !myAdminDoc) return;
+    const cleanName = clampStr(myFullNameDraft, VALIDATION_BOUNDS.NAME_MAX_LEN);
+    const cleanSchool = clampStr(mySchoolDraft, VALIDATION_BOUNDS.SCHOOL_MAX_LEN);
+    const cleanPos = clampStr(myPositionDraft, VALIDATION_BOUNDS.POSITION_MAX_LEN);
+    if (!cleanName || cleanSchool.length < 3 || !cleanPos) {
+      setFeedback({
+        type: 'err',
+        text: 'Nama Lengkap, Nama Sekolah (minimal 3 karakter), dan Jabatan wajib diisi.',
+      });
+      return;
+    }
+    setFormBusy(true);
+    setFeedback(null);
+    try {
+      await updateDoc(doc(db, 'admins', uid), {
+        fullName: cleanName,
+        schoolName: cleanSchool,
+        position: cleanPos,
+        updatedAt: serverTimestamp(),
+      });
+      const myUser = users.find((u) => u.uid === uid);
+      if (myUser) {
+        await updateDoc(doc(db, 'users', uid), {
+          fullName: cleanName,
+          participantNumber: myUser.participantNumber,
+          className: 'ADMIN',
+          schoolName: cleanSchool,
+          email: myUser.email,
+          role: 'admin',
+          accountStatus: 'active',
+          updatedAt: serverTimestamp(),
+        });
+      }
+      setEditingMyProfile(false);
+      setFeedback({
+        type: 'ok',
+        text: `Identitas sekolah diperbarui menjadi "${cleanSchool}".`,
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `admins/${uid}`);
     } finally {
       setFormBusy(false);
     }
@@ -991,7 +1257,7 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
         action: 'REVOKE_ADMIN_ROLE',
         targetType: 'admins',
         targetId: adm.uid,
-        summary: `Mencabut hak akses Administrator dari ${adm.fullName} (${adm.email})`,
+        summary: `Mencabut hak akses Administrator dari ${adm.fullName} (${adm.schoolName || '-'} · ${adm.email})`,
       });
       setConfirmRevokeAdmin(null);
       setFeedback({
@@ -1111,7 +1377,10 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
         </div>
 
         {/* Classroom Shared Token Option */}
-        <TokenManagerCard tokens={tokens} />
+        <TokenManagerCard
+          tokens={tokens}
+          schoolName={isSuperAdmin ? selectedSchoolFilter || 'ALL' : adminSchoolName}
+        />
 
         {feedback && (
           <div
@@ -1140,9 +1409,9 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
                   Impor Data Siswa dari CSV (Tanpa Email)
                 </h3>
                 <p className="text-xs text-slate-600 mt-1">
-                  Format 4 kolom (atau 5 kolom dengan token khusus):{' '}
+                  Format 3 kolom otomatis mengisi sekolah Anda (atau 4–5 kolom):{' '}
                   <code className="font-mono-tabular bg-slate-100 px-1.5 py-0.5 rounded text-slate-800">
-                    nomor_peserta,nama_lengkap,kelas,sekolah[,token]
+                    nomor_peserta,nama_lengkap,kelas[,sekolah,token]
                   </code>
                 </p>
               </div>
@@ -1160,7 +1429,7 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
               rows={5}
               value={csvText}
               onChange={(e) => setCsvText(e.target.value)}
-              placeholder={`nomor_peserta,nama_lengkap,kelas,sekolah\n06-001,Andi Pratama,VI-A,SD Negeri 1\n06-002,Siti Rahmawati,VI-A,SD Negeri 1`}
+              placeholder={`nomor_peserta,nama_lengkap,kelas\n06-001,Andi Pratama,VI-A\n06-002,Siti Rahmawati,VI-A`}
               className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs font-mono-tabular text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-600"
             />
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -1450,15 +1719,20 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Asal Sekolah
+                    Asal Sekolah Dasar
                   </label>
                   <input
                     type="text"
                     required
-                    value={schoolName}
+                    readOnly={!isSuperAdmin}
+                    value={isSuperAdmin ? schoolName : adminSchoolName}
                     onChange={(e) => setSchoolName(e.target.value)}
                     placeholder="Contoh: SD Negeri 1"
-                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    className={`w-full px-3 py-2 text-sm border rounded-lg ${
+                      isSuperAdmin
+                        ? 'border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-blue-600'
+                        : 'border-slate-200 bg-slate-50 font-semibold text-slate-800'
+                    }`}
                   />
                 </div>
 
@@ -1850,10 +2124,11 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
   }
 
   // ============================================================================
-  // MENU 13: PENGATURAN AKUN & HAK AKSES
+  // MENU 13: PENGATURAN AKUN, PENDAFTARAN SEKOLAH LAIN & HAK AKSES
   // ============================================================================
   if (activeSubTab === 'access_settings') {
     const isCurrentBootstrapped =
+      isSuperAdmin ||
       auth.currentUser?.email?.toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL.toLowerCase();
     const adminUidSet = new Set(admins.map((a) => a.uid));
     const promotableUsers = users.filter(
@@ -1862,18 +2137,318 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
         u.email.toLowerCase() !== BOOTSTRAPPED_ADMIN_EMAIL.toLowerCase()
     );
 
+    const registrationUrl =
+      typeof window !== 'undefined'
+        ? `${window.location.origin}/?daftar=admin`
+        : '/?daftar=admin';
+
+    const whatsappInviteText = ` Bapak/Ibu Guru & Proktor SD, silakan gunakan aplikasi *SIMULASI TKA SD — CBT ONLINE* (Matematika & Bahasa Indonesia Kelas VI lengkap dengan gambar PDF & koreksi nilai otomatis) untuk sekolah masing-masing.\n\n1. Buka tautan pendaftaran Admin Sekolah:\n${registrationUrl}\n2. Klik *Lanjutkan dengan Akun Google* (belajar.id / Gmail) dan isi Nama Sekolah Dasar.\n3. Data siswa di menu *Data Siswa*, bagikan Token kepada siswa (siswa masuk cukup ketik Nama + Token tanpa email).`.trim();
+
+    const copyTextWithBadge = async (text: string, kind: 'link' | 'wa') => {
+      try {
+        await navigator.clipboard.writeText(text);
+        setCopiedShareLink(kind);
+        window.setTimeout(() => setCopiedShareLink(null), 2200);
+      } catch {
+        // ignore clipboard error
+      }
+    };
+
+    const sortedSchoolAdmins = admins
+      .filter((a) => a.email.toLowerCase() !== BOOTSTRAPPED_ADMIN_EMAIL.toLowerCase())
+      .sort((a, b) => {
+        const rank = (s?: string) => (s === 'pending' ? 0 : s === 'active' || !s ? 1 : 2);
+        const rDiff = rank(a.status) - rank(b.status);
+        if (rDiff !== 0) return rDiff;
+        return (a.schoolName || '').localeCompare(b.schoolName || '', 'id');
+      });
+
+    const activeMode = registrationSettings?.mode || 'open';
+
     return (
       <div className="space-y-6">
         <div>
           <h2 className="text-xl font-bold text-slate-900">
-            Pengaturan Akun, Token &amp; Hak Akses
+            Pendaftaran Admin Sekolah Lain, Token &amp; Hak Akses
           </h2>
           <p className="text-sm text-slate-600 mt-0.5">
-            Kelola Token Kelas serta hak akses Administrator/Pengawas di Cloud Firestore.
+            Bagikan tautan pendaftaran mandiri agar Guru/Operator dari Sekolah Dasar lain dapat langsung memakai aplikasi ini untuk siswanya masing-masing.
           </p>
         </div>
 
-        <TokenManagerCard tokens={tokens} />
+        {/* Shareable Registration Link & Policy Hub */}
+        <div className="bg-white border border-slate-200 rounded-xl p-5 sm:p-6 space-y-5">
+          <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-blue-700">
+                <Share2 className="w-4 h-4" />
+                <span>Tautan Pendaftaran Admin Sekolah Baru</span>
+              </div>
+              <h3 className="text-base font-bold text-slate-900">
+                Undang Sekolah Dasar Lain Menggunakan Aplikasi Ini
+              </h3>
+              <p className="text-sm text-slate-600 max-w-2xl">
+                Guru atau Operator SD lain cukup membuka tautan di bawah ini, masuk dengan Google (<code className="font-mono-tabular text-xs">belajar.id</code> / Gmail), lalu mengisi Nama Sekolah Dasar mereka. Data siswa, token, dan rekap nilai tiap sekolah terpisah secara otomatis.
+              </p>
+            </div>
+
+            <div className="shrink-0">
+              <span
+                className={`inline-block px-3 py-1.5 rounded border text-xs font-semibold ${
+                  activeMode === 'open'
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                    : activeMode === 'approval'
+                    ? 'bg-amber-50 border-amber-200 text-amber-900'
+                    : 'bg-slate-100 border-slate-300 text-slate-700'
+                }`}
+              >
+                {activeMode === 'open'
+                  ? 'Mode Saat Ini: Pendaftaran Terbuka (Otomatis Aktif)'
+                  : activeMode === 'approval'
+                  ? 'Mode Saat Ini: Persetujuan Admin Utama'
+                  : 'Mode Saat Ini: Pendaftaran Ditutup'}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
+            <div className="flex-1 flex items-center gap-2 px-3.5 py-2.5 rounded-lg border border-slate-300 bg-slate-50 font-mono-tabular text-xs text-slate-800 overflow-x-auto">
+              <Link2 className="w-4 h-4 text-slate-500 shrink-0" />
+              <span className="truncate">{registrationUrl}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => copyTextWithBadge(registrationUrl, 'link')}
+              className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold whitespace-nowrap shrink-0"
+            >
+              {copiedShareLink === 'link' ? (
+                <>
+                  <Check className="w-3.5 h-3.5" />
+                  Tautan Tersalin
+                </>
+              ) : (
+                <>
+                  <Copy className="w-3.5 h-3.5" />
+                  Salin Link Pendaftaran
+                </>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => copyTextWithBadge(whatsappInviteText, 'wa')}
+              className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 text-xs font-semibold whitespace-nowrap shrink-0"
+            >
+              {copiedShareLink === 'wa' ? (
+                <>
+                  <Check className="w-3.5 h-3.5 text-emerald-600" />
+                  Undangan Tersalin
+                </>
+              ) : (
+                <>
+                  <Share2 className="w-3.5 h-3.5 text-slate-600" />
+                  Salin Pesan Undangan (WA / Grup KKG)
+                </>
+              )}
+            </button>
+          </div>
+
+          {isCurrentBootstrapped && (
+            <form
+              onSubmit={handleSaveRegistrationSettings}
+              className="pt-4 border-t border-slate-200 space-y-4"
+            >
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setRegModeDraft('open')}
+                  className={`p-3.5 rounded-lg border text-left transition-colors ${
+                    regModeDraft === 'open'
+                      ? 'border-blue-700 bg-blue-50/60 text-slate-900'
+                      : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  <div className="text-xs font-bold text-slate-900">
+                    1. Pendaftaran Terbuka (Disarankan)
+                  </div>
+                  <p className="text-[11px] text-slate-600 mt-1">
+                    Guru sekolah lain yang mendaftar dengan Google langsung aktif dan bisa mengelola siswanya tanpa menunggu.
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setRegModeDraft('approval')}
+                  className={`p-3.5 rounded-lg border text-left transition-colors ${
+                    regModeDraft === 'approval'
+                      ? 'border-amber-600 bg-amber-50/60 text-slate-900'
+                      : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  <div className="text-xs font-bold text-slate-900">
+                    2. Persetujuan Manual Admin Utama
+                  </div>
+                  <p className="text-[11px] text-slate-600 mt-1">
+                    Pendaftar baru masuk daftar tunggu sampai Anda mengklik tombol Setujui pada tabel di bawah.
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setRegModeDraft('closed')}
+                  className={`p-3.5 rounded-lg border text-left transition-colors ${
+                    regModeDraft === 'closed'
+                      ? 'border-slate-900 bg-slate-100 text-slate-900'
+                      : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  <div className="text-xs font-bold text-slate-900">
+                    3. Tutup Pendaftaran Baru
+                  </div>
+                  <p className="text-[11px] text-slate-600 mt-1">
+                    Hanya sekolah yang sudah terdaftar saat ini yang dapat masuk ke Dashboard Admin.
+                  </p>
+                </button>
+              </div>
+
+              <div className="flex flex-col sm:flex-row sm:items-end gap-3">
+                <div className="flex-1">
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Catatan Sambutan pada Halaman Daftar Admin Sekolah
+                  </label>
+                  <input
+                    type="text"
+                    maxLength={500}
+                    value={welcomeNoteDraft}
+                    onChange={(e) => setWelcomeNoteDraft(e.target.value)}
+                    placeholder="Pesan singkat bagi guru/proktor SD yang mendaftar..."
+                    className="w-full px-3.5 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={savingRegSettings}
+                  className="px-4 py-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-semibold whitespace-nowrap shrink-0"
+                >
+                  {savingRegSettings ? 'Menyimpan...' : 'Simpan Kebijakan Pendaftaran'}
+                </button>
+              </div>
+            </form>
+          )}
+        </div>
+
+        {/* School Admin Self-Profile Card (for non-Super-Admins) */}
+        {!isCurrentBootstrapped && myAdminDoc && (
+          <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex items-center gap-2.5">
+                <Building2 className="w-5 h-5 text-blue-700" />
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">
+                    Identitas Sekolah &amp; Profil Admin Saya
+                  </h3>
+                  <p className="text-xs text-slate-600">
+                    Pastikan penulisan Nama Sekolah Dasar konsisten dengan data siswa sekolah Anda.
+                  </p>
+                </div>
+              </div>
+              {!editingMyProfile && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMyFullNameDraft(myAdminDoc.fullName || '');
+                    setMySchoolDraft(myAdminDoc.schoolName || adminSchoolName);
+                    setMyPositionDraft(myAdminDoc.position || 'Guru Kelas VI / Proktor CBT');
+                    setEditingMyProfile(true);
+                  }}
+                  className="px-3.5 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-800 whitespace-nowrap shrink-0"
+                >
+                  Ubah Profil Sekolah
+                </button>
+              )}
+            </div>
+
+            {editingMyProfile ? (
+              <form onSubmit={handleSaveMySchoolProfile} className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Nama Lengkap
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={myFullNameDraft}
+                    onChange={(e) => setMyFullNameDraft(e.target.value)}
+                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Nama Sekolah Dasar
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={mySchoolDraft}
+                    onChange={(e) => setMySchoolDraft(e.target.value)}
+                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Jabatan
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={myPositionDraft}
+                    onChange={(e) => setMyPositionDraft(e.target.value)}
+                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                  />
+                </div>
+                <div className="sm:col-span-3 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingMyProfile(false)}
+                    className="px-3.5 py-2 rounded-lg border border-slate-300 text-xs font-semibold text-slate-700"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={formBusy}
+                    className="px-4 py-2 rounded-lg bg-blue-700 text-white text-xs font-semibold hover:bg-blue-800"
+                  >
+                    {formBusy ? 'Menyimpan...' : 'Simpan Profil Sekolah'}
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm pt-1">
+                <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
+                  <div className="text-xs text-slate-500">Nama Admin</div>
+                  <div className="font-semibold text-slate-900 mt-0.5">{myAdminDoc.fullName}</div>
+                </div>
+                <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
+                  <div className="text-xs text-slate-500">Nama Sekolah Dasar</div>
+                  <div className="font-semibold text-slate-900 mt-0.5">
+                    {myAdminDoc.schoolName || adminSchoolName}
+                  </div>
+                </div>
+                <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
+                  <div className="text-xs text-slate-500">Jabatan</div>
+                  <div className="font-semibold text-slate-900 mt-0.5">
+                    {myAdminDoc.position || 'Admin CBT Sekolah'}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        <TokenManagerCard
+          tokens={tokens}
+          schoolName={isSuperAdmin ? selectedSchoolFilter || 'ALL' : adminSchoolName}
+        />
 
         {feedback && (
           <div
@@ -1894,124 +2469,199 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
           </div>
         )}
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Primary & Registered Admins */}
-          <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
-            <div className="flex items-center gap-2.5">
-              <Shield className="w-5 h-5 text-blue-600" />
-              <h3 className="text-base font-bold text-slate-900">
-                Daftar Akun Administrator Resmi
-              </h3>
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          {/* Primary & Registered School Admins */}
+          <div
+            className={`${
+              isCurrentBootstrapped ? 'lg:col-span-8' : 'lg:col-span-12'
+            } bg-white border border-slate-200 rounded-xl p-5 space-y-4`}
+          >
+            <div className="flex items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2.5">
+                <Shield className="w-5 h-5 text-blue-600" />
+                <h3 className="text-base font-bold text-slate-900">
+                  Daftar Sekolah &amp; Akun Administrator Terdaftar
+                </h3>
+              </div>
+              <span className="text-xs font-mono-tabular font-semibold text-slate-500">
+                {sortedSchoolAdmins.length + 1} akun
+              </span>
             </div>
 
             <div className="border border-slate-200 rounded-lg divide-y divide-slate-200">
-              <div className="p-3.5 flex items-center justify-between gap-3 bg-slate-50/70">
+              <div className="p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50/70">
                 <div>
                   <div className="text-sm font-semibold text-slate-900">
-                    Administrator Utama (Bootstrapped)
+                    Administrator Utama (Pengelola Pusat)
                   </div>
                   <div className="text-xs text-slate-600 font-mono-tabular mt-0.5">
                     {BOOTSTRAPPED_ADMIN_EMAIL}
                   </div>
                 </div>
-                <span className="px-2 py-0.5 text-xs font-semibold bg-blue-50 text-blue-800 border border-blue-200 rounded whitespace-nowrap shrink-0">
-                  Permanen
+                <span className="px-2.5 py-1 text-xs font-semibold bg-blue-50 text-blue-800 border border-blue-200 rounded whitespace-nowrap shrink-0 self-start sm:self-center">
+                  Admin Utama
                 </span>
               </div>
 
-              {admins
-                .filter(
-                  (a) => a.email.toLowerCase() !== BOOTSTRAPPED_ADMIN_EMAIL.toLowerCase()
-                )
-                .map((adm) => (
-                  <div
-                    key={adm.uid}
-                    className="p-3.5 flex items-center justify-between gap-3"
-                  >
-                    <div>
-                      <div className="text-sm font-semibold text-slate-900">
-                        {adm.fullName}
+              {sortedSchoolAdmins.length === 0 ? (
+                <div className="p-6 text-center text-sm text-slate-500">
+                  Belum ada Admin dari sekolah lain yang mendaftar. Bagikan tautan pendaftaran di atas kepada rekan Guru / Operator SD.
+                </div>
+              ) : (
+                sortedSchoolAdmins.map((adm) => {
+                  const status = adm.status || 'active';
+                  return (
+                    <div
+                      key={adm.uid}
+                      className="p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                    >
+                      <div className="space-y-0.5">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-sm font-semibold text-slate-900">
+                            {adm.fullName}
+                          </span>
+                          {adm.position && (
+                            <span className="text-xs text-slate-500">· {adm.position}</span>
+                          )}
+                        </div>
+                        <div className="text-xs font-semibold text-blue-800">
+                          {adm.schoolName || 'Sekolah Penyelenggara'}
+                        </div>
+                        <div className="text-xs text-slate-500 font-mono-tabular">
+                          {adm.email}
+                        </div>
                       </div>
-                      <div className="text-xs text-slate-600 font-mono-tabular mt-0.5">
-                        {adm.email}
+
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        <span
+                          className={`px-2 py-0.5 text-xs font-semibold rounded border ${
+                            status === 'active'
+                              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                              : status === 'pending'
+                              ? 'bg-amber-50 border-amber-200 text-amber-900'
+                              : 'bg-red-50 border-red-200 text-red-800'
+                          }`}
+                        >
+                          {status === 'active'
+                            ? 'Aktif'
+                            : status === 'pending'
+                            ? 'Menunggu Persetujuan'
+                            : 'Nonaktif'}
+                        </span>
+
+                        {isCurrentBootstrapped && (
+                          <>
+                            {status !== 'active' && (
+                              <button
+                                type="button"
+                                disabled={formBusy}
+                                onClick={() => handleSetAdminStatus(adm, 'active')}
+                                className="px-2.5 py-1 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded whitespace-nowrap shrink-0"
+                              >
+                                {status === 'pending' ? 'Setujui' : 'Aktifkan'}
+                              </button>
+                            )}
+                            {status === 'active' && (
+                              <button
+                                type="button"
+                                disabled={formBusy}
+                                onClick={() => handleSetAdminStatus(adm, 'suspended')}
+                                className="px-2.5 py-1 text-xs font-medium text-amber-900 bg-amber-50 border border-amber-200 rounded hover:bg-amber-100 whitespace-nowrap shrink-0"
+                              >
+                                Nonaktifkan
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              disabled={formBusy}
+                              onClick={() => setConfirmRevokeAdmin(adm)}
+                              className="px-2.5 py-1 text-xs font-medium text-red-700 bg-red-50 border border-red-200 rounded hover:bg-red-100 whitespace-nowrap shrink-0"
+                            >
+                              Hapus
+                            </button>
+                          </>
+                        )}
                       </div>
                     </div>
-                    {isCurrentBootstrapped ? (
-                      <button
-                        type="button"
-                        onClick={() => setConfirmRevokeAdmin(adm)}
-                        className="px-2.5 py-1 text-xs font-medium text-red-700 bg-red-50 border border-red-200 rounded hover:bg-red-100 whitespace-nowrap shrink-0"
-                      >
-                        Cabut Akses
-                      </button>
-                    ) : (
-                      <span className="text-xs text-slate-500">Admin Terdaftar</span>
-                    )}
-                  </div>
-                ))}
+                  );
+                })
+              )}
             </div>
           </div>
 
-          {/* Grant Admin to Verified Account */}
-          <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
-            <div className="flex items-center gap-2.5">
-              <UserCog className="w-5 h-5 text-slate-700" />
-              <h3 className="text-base font-bold text-slate-900">
-                Tambahkan Guru / Pengawas sebagai Admin
-              </h3>
-            </div>
-            <p className="text-sm text-slate-600">
-              Guru atau pengawas pendamping cukup mencoba masuk satu kali melalui halaman <strong>Masuk Admin dengan Google</strong> agar akunnya tercatat, lalu pilih akunnya di bawah ini untuk diberikan hak akses Administrator.
-            </p>
-
-            <div className="space-y-3">
-              <label className="block text-xs font-semibold text-slate-700">
-                Pilih Calon Pengawas / Guru
-              </label>
-              <select
-                value={selectedPromoteUid}
-                onChange={(e) => setSelectedPromoteUid(e.target.value)}
-                className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-600"
-              >
-                <option value="">-- Pilih akun guru yang telah mencoba masuk --</option>
-                {promotableUsers.map((u) => (
-                  <option key={u.uid} value={u.uid}>
-                    {u.fullName} ({u.email})
-                  </option>
-                ))}
-              </select>
-
-              <button
-                type="button"
-                disabled={!selectedPromoteUid || formBusy}
-                onClick={handlePromoteToAdmin}
-                className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap shrink-0"
-              >
-                <CheckCircle2 className="w-4 h-4" />
-                {formBusy ? 'Menyimpan...' : 'Berikan Hak Akses Admin'}
-              </button>
-            </div>
-
-            <div className="pt-3 border-t border-slate-200 space-y-1.5 text-xs text-slate-600">
-              <div className="font-semibold text-slate-800">
-                Aturan Akses Siswa &amp; Admin:
+          {/* Manual Grant Admin (Super Admin Only) */}
+          {isCurrentBootstrapped && (
+            <div className="lg:col-span-4 bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+              <div className="flex items-center gap-2.5">
+                <UserCog className="w-5 h-5 text-slate-700" />
+                <h3 className="text-base font-bold text-slate-900">
+                  Angkat Manual Akun Guru
+                </h3>
               </div>
-              <p>
-                <strong>Siswa:</strong> Hanya dapat masuk tanpa email apabila Admin sudah mendata <em>Nama Lengkap</em> siswa pada Data Siswa dan memberikan <em>Token Ujian aktif</em>.<br />
-                <strong>Admin / Pengawas:</strong> Masuk menggunakan <em>Google Sign-In / Akun Belajar.id</em> terverifikasi.
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Selain lewat tautan <strong>Daftar Admin Sekolah</strong> mandiri, Anda juga dapat mengangkat akun guru yang sudah pernah masuk Google secara manual di sini.
               </p>
+
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Pilih Akun Guru
+                  </label>
+                  <select
+                    value={selectedPromoteUid}
+                    onChange={(e) => {
+                      const uid = e.target.value;
+                      setSelectedPromoteUid(uid);
+                      const found = users.find((u) => u.uid === uid);
+                      if (found?.schoolName) setPromoteSchoolName(found.schoolName);
+                    }}
+                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                  >
+                    <option value="">-- Pilih akun guru --</option>
+                    {promotableUsers.map((u) => (
+                      <option key={u.uid} value={u.uid}>
+                        {u.fullName} ({u.email})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Nama Sekolah Dasar
+                  </label>
+                  <input
+                    type="text"
+                    value={promoteSchoolName}
+                    onChange={(e) => setPromoteSchoolName(e.target.value)}
+                    placeholder="Contoh: SD Negeri 2 Harapan"
+                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  disabled={!selectedPromoteUid || formBusy}
+                  onClick={handlePromoteToAdmin}
+                  className="w-full inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap"
+                >
+                  <CheckCircle2 className="w-4 h-4" />
+                  {formBusy ? 'Menyimpan...' : 'Berikan Hak Akses Admin'}
+                </button>
+              </div>
             </div>
-          </div>
+          )}
         </div>
 
         {confirmRevokeAdmin && (
           <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
             <div className="bg-white rounded-xl border border-slate-200 max-w-md w-full p-6 space-y-4 shadow-xl">
               <h3 className="text-base font-bold text-slate-900">
-                Cabut Hak Akses Administrator?
+                Hapus Hak Akses Administrator?
               </h3>
               <p className="text-sm text-slate-600">
-                Akun <strong>{confirmRevokeAdmin.fullName}</strong> ({confirmRevokeAdmin.email}) tidak lagi dapat membuka Dashboard Admin maupun melihat kunci jawaban.
+                Akun <strong>{confirmRevokeAdmin.fullName}</strong> (
+                {confirmRevokeAdmin.schoolName || confirmRevokeAdmin.email}) tidak lagi dapat membuka Dashboard Admin.
               </p>
               <div className="flex items-center justify-end gap-2.5 pt-2">
                 <button
@@ -2027,7 +2677,7 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
                   onClick={() => handleRevokeAdmin(confirmRevokeAdmin)}
                   className="px-4 py-2 text-sm font-semibold text-white bg-red-600 rounded-lg hover:bg-red-700 disabled:opacity-50 whitespace-nowrap shrink-0"
                 >
-                  {formBusy ? 'Memproses...' : 'Ya, Cabut Akses'}
+                  {formBusy ? 'Memproses...' : 'Ya, Hapus Akses'}
                 </button>
               </div>
             </div>

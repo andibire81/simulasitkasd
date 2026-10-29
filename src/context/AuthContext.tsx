@@ -9,7 +9,9 @@ import {
 import {
   doc,
   getDoc,
+  onSnapshot,
   setDoc,
+  updateDoc,
   deleteDoc,
   serverTimestamp,
   Timestamp,
@@ -21,26 +23,49 @@ import {
   BOOTSTRAPPED_ADMIN_EMAIL,
   handleFirestoreError,
   OperationType,
+  recordAuditLog,
 } from '../lib/firebase';
 import {
+  AdminRecord,
+  AdminRegistrationSettingsRecord,
   UserProfile,
   CbtTokenRecord,
   StudentDirectoryRecord,
   StudentSessionRecord,
   clampStr,
   computeStudentDocId,
+  computeStudentDocIdForSchool,
   generateRandomSessionId,
+  normalizeStudentName,
   VALIDATION_BOUNDS,
 } from '../types/cbt';
 import { getAuthoritativeNowMs, syncServerClock } from '../lib/serverClock';
 
 const STUDENT_SESSION_STORAGE_KEY = 'cbt_student_session_id';
 
+export type AdminOnboardingState =
+  | 'none'
+  | 'needs_registration'
+  | 'pending_approval'
+  | 'suspended';
+
+const DEFAULT_REGISTRATION_SETTINGS: AdminRegistrationSettingsRecord = {
+  id: 'registration',
+  mode: 'open',
+  welcomeNote:
+    'Terbuka bagi Guru Kelas VI, Proktor CBT, dan Operator Sekolah Dasar untuk menyelenggarakan simulasi TKA SD di sekolah masing-masing.',
+  updatedBy: BOOTSTRAPPED_ADMIN_EMAIL,
+};
+
 interface AuthContextValue {
   firebaseUser: FirebaseUser | null;
   studentSession: StudentSessionRecord | null;
   profile: UserProfile | null;
+  adminRecord: AdminRecord | null;
   isAdmin: boolean;
+  isSuperAdmin: boolean;
+  adminOnboardingState: AdminOnboardingState;
+  registrationSettings: AdminRegistrationSettingsRecord;
   authReady: boolean;
   authError: string | null;
   clearAuthError: () => void;
@@ -48,7 +73,12 @@ interface AuthContextValue {
     studentName: string,
     tokenInput: string
   ) => Promise<boolean>;
-  signInWithGoogle: () => Promise<boolean>;
+  signInWithGoogle: () => Promise<'admin' | 'onboarding' | 'error'>;
+  completeSchoolAdminRegistration: (params: {
+    fullName: string;
+    schoolName: string;
+    position: string;
+  }) => Promise<'active' | 'pending' | null>;
   signInWithCredentials: (
     emailOrUsername: string,
     pinOrPassword: string
@@ -75,7 +105,7 @@ function translateAuthError(error: unknown): string {
     return 'Email atau kata sandi administrator tidak sesuai. Periksa kembali identitas Anda.';
   }
   if (msg.includes('auth/operation-not-allowed')) {
-    return 'Metode masuk Email/Kata Sandi belum diaktifkan di Firebase Console. Gunakan tombol Masuk Admin dengan Google.';
+    return 'Metode masuk Email/Kata Sandi belum diaktifkan di Firebase Console. Gunakan tombol Masuk/Daftar dengan Google.';
   }
   if (msg.includes('auth/network-request-failed')) {
     return 'Koneksi internet terputus. Periksa jaringan Anda lalu coba kembali.';
@@ -103,9 +133,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [studentSession, setStudentSession] = useState<StudentSessionRecord | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [adminRecord, setAdminRecord] = useState<AdminRecord | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
+  const [adminOnboardingState, setAdminOnboardingState] =
+    useState<AdminOnboardingState>('none');
+  const [registrationSettings, setRegistrationSettings] =
+    useState<AdminRegistrationSettingsRecord>(DEFAULT_REGISTRATION_SETTINGS);
   const [authReady, setAuthReady] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+
+  // Subscribe to public registration policy (/adminSettings/registration)
+  useEffect(() => {
+    const unsub = onSnapshot(
+      doc(db, 'adminSettings', 'registration'),
+      (snap) => {
+        if (snap.exists()) {
+          setRegistrationSettings(snap.data() as AdminRegistrationSettingsRecord);
+        } else {
+          setRegistrationSettings(DEFAULT_REGISTRATION_SETTINGS);
+        }
+      },
+      () => {
+        setRegistrationSettings(DEFAULT_REGISTRATION_SETTINGS);
+      }
+    );
+    return () => unsub();
+  }, []);
 
   const clearSavedStudentSessionLocal = useCallback(() => {
     try {
@@ -165,7 +219,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const tokData = tokSnap.data() as CbtTokenRecord;
       if (
         !tokData.active ||
-        (tokData.scope === 'student' && tokData.studentId !== stuData.id)
+        (tokData.scope === 'student' && tokData.studentId !== stuData.id) ||
+        (tokData.schoolName &&
+          tokData.schoolName !== 'Semua' &&
+          tokData.schoolName !== stuData.schoolName)
       ) {
         clearSavedStudentSessionLocal();
         return false;
@@ -175,133 +232,181 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setProfile(buildStudentProfileFromDirectory(stuData));
       return true;
     } catch {
-      // Session expired, student deactivated, or token revoked by Admin
       clearSavedStudentSessionLocal();
       return false;
     }
   }, [clearSavedStudentSessionLocal]);
 
-  const loadAdminIdentity = useCallback(async (fbUser: FirebaseUser): Promise<boolean> => {
-    await syncServerClock();
-    const email = (fbUser.email || '').trim();
-    const isBootstrapped =
-      fbUser.emailVerified &&
-      email.toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL.toLowerCase();
+  const loadAdminIdentity = useCallback(
+    async (fbUser: FirebaseUser): Promise<'admin' | 'onboarding' | 'unverified'> => {
+      await syncServerClock();
+      const email = (fbUser.email || '').trim();
+      if (!fbUser.emailVerified || !email) {
+        setIsAdmin(false);
+        setIsSuperAdmin(false);
+        setAdminRecord(null);
+        setAdminOnboardingState('none');
+        setProfile(null);
+        return 'unverified';
+      }
 
-    let verifiedAdmin = isBootstrapped;
-    if (!verifiedAdmin && fbUser.emailVerified) {
+      const bootstrapped =
+        email.toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL.toLowerCase();
+      setIsSuperAdmin(bootstrapped);
+
+      let fetchedAdminDoc: AdminRecord | null = null;
       try {
         const adminSnap = await getDoc(doc(db, 'admins', fbUser.uid));
-        verifiedAdmin = adminSnap.exists();
-      } catch {
-        verifiedAdmin = false;
-      }
-    }
-
-    if (!verifiedAdmin) {
-      // Register candidate verified teacher profile in /users/{uid} so Primary Admin can grant access in Menu 13
-      if (fbUser.emailVerified && email) {
-        try {
-          const candidateRef = doc(db, 'users', fbUser.uid);
-          const candidateSnap = await getDoc(candidateRef);
-          if (!candidateSnap.exists()) {
-            await setDoc(candidateRef, {
-              uid: fbUser.uid,
-              fullName: clampStr(fbUser.displayName || email.split('@')[0], VALIDATION_BOUNDS.NAME_MAX_LEN),
-              participantNumber: 'CALON-ADMIN',
-              className: 'GURU',
-              schoolName: 'Sekolah Dasar',
-              email: clampStr(email, VALIDATION_BOUNDS.EMAIL_MAX_LEN),
-              role: 'student',
-              accountStatus: 'active',
-              createdAt: serverTimestamp(),
-              updatedAt: serverTimestamp(),
-            });
-          }
-        } catch {
-          // Ignore non-fatal candidate registration error
+        if (adminSnap.exists()) {
+          fetchedAdminDoc = adminSnap.data() as AdminRecord;
         }
+      } catch {
+        fetchedAdminDoc = null;
       }
-      setIsAdmin(false);
-      setProfile(null);
-      return false;
-    }
 
-    // Clear any student session if an Admin logs in
-    try {
-      localStorage.removeItem(STUDENT_SESSION_STORAGE_KEY);
-    } catch {
-      // ignore
-    }
-    setStudentSession(null);
-    setIsAdmin(true);
+      const isActiveAdmin =
+        bootstrapped ||
+        Boolean(
+          fetchedAdminDoc &&
+            (!fetchedAdminDoc.status || fetchedAdminDoc.status === 'active')
+        );
 
-    if (isBootstrapped) {
+      if (!isActiveAdmin) {
+        // Clear student session while teacher completes school onboarding or checks status
+        try {
+          localStorage.removeItem(STUDENT_SESSION_STORAGE_KEY);
+        } catch {
+          // ignore
+        }
+        setStudentSession(null);
+        setIsAdmin(false);
+        setProfile(null);
+        setAdminRecord(fetchedAdminDoc);
+
+        if (fetchedAdminDoc?.status === 'pending') {
+          setAdminOnboardingState('pending_approval');
+        } else if (fetchedAdminDoc?.status === 'suspended') {
+          setAdminOnboardingState('suspended');
+        } else {
+          setAdminOnboardingState('needs_registration');
+        }
+        return 'onboarding';
+      }
+
+      // Active Admin! Clear any student session
       try {
-        const adminDocRef = doc(db, 'admins', fbUser.uid);
-        const existingAdminSnap = await getDoc(adminDocRef);
-        if (!existingAdminSnap.exists()) {
-          await setDoc(adminDocRef, {
+        localStorage.removeItem(STUDENT_SESSION_STORAGE_KEY);
+      } catch {
+        // ignore
+      }
+      setStudentSession(null);
+      setIsAdmin(true);
+      setAdminOnboardingState('none');
+
+      if (bootstrapped && !fetchedAdminDoc) {
+        try {
+          const adminDocRef = doc(db, 'admins', fbUser.uid);
+          const payload = {
             uid: fbUser.uid,
             email: clampStr(email, VALIDATION_BOUNDS.EMAIL_MAX_LEN),
             fullName: clampStr(
-              fbUser.displayName || 'Administrator CBT',
+              fbUser.displayName || 'Administrator Utama CBT',
               VALIDATION_BOUNDS.NAME_MAX_LEN
             ),
+            schoolName: 'Penyelenggara TKA SD',
+            position: 'Administrator Utama',
+            status: 'active' as const,
             createdBy: fbUser.uid,
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
-          });
+          };
+          await setDoc(adminDocRef, payload);
+          const createdSnap = await getDoc(adminDocRef);
+          if (createdSnap.exists()) {
+            fetchedAdminDoc = createdSnap.data() as AdminRecord;
+          }
+        } catch (err) {
+          console.warn('Admin bootstrap sync warning:', err);
         }
-      } catch (err) {
-        console.warn('Admin bootstrap sync warning:', err);
-      }
-    }
-
-    const userPath = `users/${fbUser.uid}`;
-    try {
-      const userSnap = await getDoc(doc(db, 'users', fbUser.uid));
-      if (userSnap.exists()) {
-        setProfile(userSnap.data() as UserProfile);
-        return true;
       }
 
-      const newAdminProfile = {
-        uid: fbUser.uid,
-        fullName: clampStr(
-          fbUser.displayName || 'Administrator Utama',
-          VALIDATION_BOUNDS.NAME_MAX_LEN
-        ),
-        participantNumber: 'ADMIN-01',
-        className: 'ADMIN',
-        schoolName: 'Penyelenggara TKA SD',
-        email: clampStr(email, VALIDATION_BOUNDS.EMAIL_MAX_LEN),
-        role: 'admin' as const,
-        accountStatus: 'active' as const,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      };
-      await setDoc(doc(db, 'users', fbUser.uid), newAdminProfile);
-      const reloaded = await getDoc(doc(db, 'users', fbUser.uid));
-      setProfile(reloaded.data() as UserProfile);
-      return true;
-    } catch (error) {
-      handleFirestoreError(error, OperationType.GET, userPath);
-    }
-  }, []);
+      setAdminRecord(fetchedAdminDoc);
+
+      const resolvedSchoolName = clampStr(
+        fetchedAdminDoc?.schoolName || 'Penyelenggara TKA SD',
+        VALIDATION_BOUNDS.SCHOOL_MAX_LEN
+      );
+      const resolvedFullName = clampStr(
+        fetchedAdminDoc?.fullName || fbUser.displayName || 'Administrator CBT',
+        VALIDATION_BOUNDS.NAME_MAX_LEN
+      );
+
+      const userPath = `users/${fbUser.uid}`;
+      try {
+        const userSnap = await getDoc(doc(db, 'users', fbUser.uid));
+        if (userSnap.exists()) {
+          const uData = userSnap.data() as UserProfile;
+          // Ensure role & schoolName stay aligned with active admin record
+          if (
+            uData.role !== 'admin' ||
+            (fetchedAdminDoc?.schoolName && uData.schoolName !== resolvedSchoolName)
+          ) {
+            await updateDoc(doc(db, 'users', fbUser.uid), {
+              fullName: resolvedFullName,
+              participantNumber: bootstrapped ? 'ADMIN-01' : 'ADMIN-SEKOLAH',
+              className: 'ADMIN',
+              schoolName: resolvedSchoolName,
+              email: clampStr(email, VALIDATION_BOUNDS.EMAIL_MAX_LEN),
+              role: 'admin',
+              accountStatus: 'active',
+              updatedAt: serverTimestamp(),
+            });
+            const refreshed = await getDoc(doc(db, 'users', fbUser.uid));
+            setProfile(refreshed.data() as UserProfile);
+          } else {
+            setProfile(uData);
+          }
+          return 'admin';
+        }
+
+        const newAdminProfile = {
+          uid: fbUser.uid,
+          fullName: resolvedFullName,
+          participantNumber: bootstrapped ? 'ADMIN-01' : 'ADMIN-SEKOLAH',
+          className: 'ADMIN',
+          schoolName: resolvedSchoolName,
+          email: clampStr(email, VALIDATION_BOUNDS.EMAIL_MAX_LEN),
+          role: 'admin' as const,
+          accountStatus: 'active' as const,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        };
+        await setDoc(doc(db, 'users', fbUser.uid), newAdminProfile);
+        const reloaded = await getDoc(doc(db, 'users', fbUser.uid));
+        setProfile(reloaded.data() as UserProfile);
+        return 'admin';
+      } catch (error) {
+        handleFirestoreError(error, OperationType.GET, userPath);
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       setFirebaseUser(fbUser);
       if (!fbUser) {
         setIsAdmin(false);
+        setIsSuperAdmin(false);
+        setAdminRecord(null);
+        setAdminOnboardingState('none');
         await restoreSavedStudentSession();
         setAuthReady(true);
         return;
       }
       try {
-        const ok = await loadAdminIdentity(fbUser);
-        if (!ok) {
+        const result = await loadAdminIdentity(fbUser);
+        if (result === 'unverified') {
           await firebaseSignOut(auth);
           setFirebaseUser(null);
         }
@@ -347,68 +452,129 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await firebaseSignOut(auth);
       setFirebaseUser(null);
       setIsAdmin(false);
+      setIsSuperAdmin(false);
+      setAdminRecord(null);
+      setAdminOnboardingState('none');
     }
 
     await syncServerClock();
 
-    // 1. PREREQUISITE A: Admin must have registered the student's name in /studentDirectory/{studentId}
-    //    AND granted token access (tokenStatus !== 'withheld').
-    const studentId = computeStudentDocId(cleanName);
-    let studentRecord: StudentDirectoryRecord | null = null;
+    // 1. Inspect the active CBT Token first so we can resolve school-scoped or personal StudentDirectory IDs accurately
+    let tokenData: CbtTokenRecord | null = null;
     try {
-      const stuSnap = await getDoc(doc(db, 'studentDirectory', studentId));
-      if (!stuSnap.exists()) {
-        setAuthError(
-          'Nama siswa belum didata oleh Admin. Siswa hanya dapat masuk apabila Admin sudah mendata nama siswa dan memberikan token terlebih dahulu.'
-        );
-        return false;
-      }
-      studentRecord = stuSnap.data() as StudentDirectoryRecord;
-      if (studentRecord.accountStatus !== 'active') {
-        setAuthError(
-          'Data peserta atas nama tersebut sedang dinonaktifkan oleh Admin/Pengawas.'
-        );
-        return false;
-      }
-      if (studentRecord.tokenStatus === 'withheld') {
-        setAuthError(
-          'Nama Anda sudah didata oleh Admin, tetapi Admin belum memberikan/mengaktifkan Token Ujian untuk Anda. Silakan minta Token Ujian kepada Admin/Pengawas.'
-        );
-        return false;
+      const tokenSnap = await getDoc(doc(db, 'cbtTokens', cleanToken));
+      if (tokenSnap.exists()) {
+        tokenData = tokenSnap.data() as CbtTokenRecord;
       }
     } catch {
+      tokenData = null;
+    }
+
+    if (!tokenData || !tokenData.active) {
+      // Check legacy ID just to provide accurate guidance if student isn't registered yet
+      try {
+        const legacySnap = await getDoc(
+          doc(db, 'studentDirectory', computeStudentDocId(cleanName))
+        );
+        if (!legacySnap.exists()) {
+          setAuthError(
+            'Kode Token tidak aktif atau Nama Siswa belum didata oleh Admin Sekolah Anda. Pastikan Guru/Admin sudah mendata nama Anda dan memberikan Token Ujian aktif.'
+          );
+          return false;
+        }
+      } catch {
+        // ignore
+      }
       setAuthError(
-        'Data peserta atas nama tersebut sedang dinonaktifkan oleh Admin/Pengawas.'
+        'Kode Token tidak sesuai atau sedang tidak aktif. Mintalah kode Token Ujian aktif kepada Guru/Admin Sekolah Anda.'
       );
       return false;
     }
 
-    // 2. PREREQUISITE B: Admin must have issued & activated the Token in /cbtTokens/{cleanToken}
-    //    matching either this specific student (scope === 'student') or the classroom (scope === 'classroom').
-    try {
-      const tokenSnap = await getDoc(doc(db, 'cbtTokens', cleanToken));
-      if (!tokenSnap.exists()) {
+    // 2. Build deterministic candidate StudentDirectory IDs (supports personal token, school classroom token, and legacy IDs)
+    const candidateStudentIds: string[] = [];
+    if (tokenData.scope === 'student' && tokenData.studentId) {
+      candidateStudentIds.push(tokenData.studentId);
+    } else {
+      if (tokenData.schoolName && tokenData.schoolName !== 'Semua') {
+        candidateStudentIds.push(
+          computeStudentDocIdForSchool(cleanName, tokenData.schoolName)
+        );
+      }
+      const legacyId = computeStudentDocId(cleanName);
+      if (!candidateStudentIds.includes(legacyId)) {
+        candidateStudentIds.push(legacyId);
+      }
+    }
+
+    let studentRecord: StudentDirectoryRecord | null = null;
+    let withheldFound = false;
+    let inactiveFound = false;
+    let nameMismatchOnPersonalToken = false;
+
+    for (const candidateId of candidateStudentIds) {
+      try {
+        const stuSnap = await getDoc(doc(db, 'studentDirectory', candidateId));
+        if (!stuSnap.exists()) continue;
+        const candidateData = stuSnap.data() as StudentDirectoryRecord;
+
+        if (
+          normalizeStudentName(candidateData.fullName) !==
+          normalizeStudentName(cleanName)
+        ) {
+          if (tokenData.scope === 'student') {
+            nameMismatchOnPersonalToken = true;
+          }
+          continue;
+        }
+
+        if (candidateData.accountStatus !== 'active') {
+          inactiveFound = true;
+          continue;
+        }
+
+        if (candidateData.tokenStatus === 'withheld') {
+          withheldFound = true;
+          continue;
+        }
+
+        if (
+          tokenData.schoolName &&
+          tokenData.schoolName !== 'Semua' &&
+          candidateData.schoolName !== tokenData.schoolName
+        ) {
+          continue;
+        }
+
+        studentRecord = candidateData;
+        break;
+      } catch {
+        // Inactive docs return PERMISSION_DENIED for unauthenticated get
+        inactiveFound = true;
+      }
+    }
+
+    if (!studentRecord) {
+      if (nameMismatchOnPersonalToken) {
         setAuthError(
-          'Kode Token tidak sesuai atau belum diaktifkan oleh Admin. Gunakan Token Ujian aktif yang diberikan oleh Admin/Pengawas.'
+          'Kode Token tersebut diberikan untuk peserta lain, atau ejaan Nama Lengkap belum sesuai dengan pendataan Guru/Admin.'
         );
         return false;
       }
-      const tokenData = tokenSnap.data() as CbtTokenRecord;
-      if (!tokenData.active) {
+      if (withheldFound) {
         setAuthError(
-          'Token Ujian tersebut sedang tidak aktif. Mintalah Token Ujian aktif kepada Admin/Pengawas.'
+          'Nama Anda sudah didata oleh Guru/Admin, tetapi akses Token Ujian Anda sedang ditahan. Silakan minta pengaktifan Token kepada Pengawas.'
         );
         return false;
       }
-      if (tokenData.scope === 'student' && tokenData.studentId !== studentRecord.id) {
+      if (inactiveFound) {
         setAuthError(
-          'Kode Token tersebut diberikan untuk peserta lain. Gunakan Token Ujian yang diberikan khusus untuk nama Anda oleh Admin/Pengawas.'
+          'Data peserta atas nama tersebut sedang dinonaktifkan oleh Guru/Admin Sekolah.'
         );
         return false;
       }
-    } catch {
       setAuthError(
-        'Token Ujian tidak sesuai atau sedang dinonaktifkan oleh Admin/Pengawas.'
+        'Nama Lengkap belum ditemukan pada daftar siswa sekolah pemilik Token ini. Pastikan ejaan Nama Lengkap sesuai dengan pendataan Guru/Admin Anda.'
       );
       return false;
     }
@@ -456,30 +622,146 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch (err) {
       console.error('Failed creating student capability session:', err);
       setAuthError(
-        'Akses ditolak: pastikan Nama Lengkap Anda sudah didata oleh Admin dan Token Ujian yang dimasukkan sudah diaktifkan oleh Admin.'
+        'Akses ditolak: pastikan Nama Lengkap Anda sudah didata oleh Admin dan Token Ujian yang dimasukkan sudah diaktifkan.'
       );
       return false;
     }
   };
 
-  const signInWithGoogle = async (): Promise<boolean> => {
+  const signInWithGoogle = async (): Promise<'admin' | 'onboarding' | 'error'> => {
     setAuthError(null);
     try {
       const cred = await signInWithPopup(auth, googleProvider);
       const user = cred.user;
-      const ok = await loadAdminIdentity(user);
-      if (!ok) {
+      if (!user.emailVerified || !user.email) {
         await firebaseSignOut(auth);
         setFirebaseUser(null);
         setAuthError(
-          `Akun Google (${user.email || 'ini'}) belum terdaftar sebagai Administrator. Akun Anda telah dicatat pada daftar calon pengawas — mintalah Administrator Utama memberikan hak akses pada menu Akun & Hak Akses.`
+          'Akun Google harus memiliki alamat email yang terverifikasi untuk menjadi Admin Sekolah.'
         );
-        return false;
+        return 'error';
       }
-      return true;
+      const status = await loadAdminIdentity(user);
+      if (status === 'admin') return 'admin';
+      if (status === 'onboarding') return 'onboarding';
+      return 'error';
     } catch (err) {
       setAuthError(translateAuthError(err));
-      return false;
+      return 'error';
+    }
+  };
+
+  const completeSchoolAdminRegistration = async (params: {
+    fullName: string;
+    schoolName: string;
+    position: string;
+  }): Promise<'active' | 'pending' | null> => {
+    setAuthError(null);
+    const fbUser = auth.currentUser;
+    if (!fbUser || !fbUser.emailVerified || !fbUser.email) {
+      setAuthError('Silakan masuk dengan Akun Google terverifikasi terlebih dahulu.');
+      return null;
+    }
+
+    const cleanName = clampStr(
+      params.fullName.replace(/\s+/g, ' '),
+      VALIDATION_BOUNDS.NAME_MAX_LEN
+    );
+    const cleanSchool = clampStr(
+      params.schoolName.replace(/\s+/g, ' '),
+      VALIDATION_BOUNDS.SCHOOL_MAX_LEN
+    );
+    const cleanPosition = clampStr(
+      params.position.replace(/\s+/g, ' ') || 'Guru Kelas VI',
+      VALIDATION_BOUNDS.POSITION_MAX_LEN
+    );
+    const cleanEmail = clampStr(fbUser.email, VALIDATION_BOUNDS.EMAIL_MAX_LEN);
+
+    if (cleanName.length < 2) {
+      setAuthError('Masukkan Nama Lengkap Guru / Admin Sekolah dengan benar.');
+      return null;
+    }
+    if (cleanSchool.length < 3) {
+      setAuthError('Masukkan Nama Sekolah Dasar dengan lengkap (contoh: SD Negeri 1 ...).');
+      return null;
+    }
+
+    await syncServerClock();
+
+    // Check latest registration mode from Firestore
+    let currentMode = registrationSettings.mode;
+    try {
+      const regSnap = await getDoc(doc(db, 'adminSettings', 'registration'));
+      if (regSnap.exists()) {
+        currentMode = (regSnap.data() as AdminRegistrationSettingsRecord).mode;
+      } else {
+        currentMode = 'open';
+      }
+    } catch {
+      currentMode = 'open';
+    }
+
+    if (currentMode === 'closed') {
+      setAuthError(
+        'Pendaftaran mandiri Admin Sekolah baru sedang ditutup sementara oleh Administrator Utama.'
+      );
+      return null;
+    }
+
+    const targetStatus: 'active' | 'pending' =
+      currentMode === 'approval' ? 'pending' : 'active';
+
+    try {
+      // 1. Create /admins/{uid} document first so isAdmin() becomes active immediately when mode == 'open'
+      await setDoc(doc(db, 'admins', fbUser.uid), {
+        uid: fbUser.uid,
+        email: cleanEmail,
+        fullName: cleanName,
+        schoolName: cleanSchool,
+        position: cleanPosition,
+        status: targetStatus,
+        createdBy: fbUser.uid,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
+      // 2. Create or update /users/{uid} profile
+      const userRef = doc(db, 'users', fbUser.uid);
+      const existingUserSnap = await getDoc(userRef);
+      const userPayload = {
+        fullName: cleanName,
+        participantNumber: targetStatus === 'active' ? 'ADMIN-SEKOLAH' : 'CALON-ADMIN',
+        className: targetStatus === 'active' ? 'ADMIN' : 'GURU',
+        schoolName: cleanSchool,
+        email: cleanEmail,
+        role: (targetStatus === 'active' ? 'admin' : 'student') as 'admin' | 'student',
+        accountStatus: 'active' as const,
+        updatedAt: serverTimestamp(),
+      };
+
+      if (existingUserSnap.exists()) {
+        await updateDoc(userRef, userPayload);
+      } else {
+        await setDoc(userRef, {
+          uid: fbUser.uid,
+          ...userPayload,
+          createdAt: serverTimestamp(),
+        });
+      }
+
+      if (targetStatus === 'active') {
+        await recordAuditLog({
+          action: 'REGISTER_SCHOOL_ADMIN',
+          targetType: 'admins',
+          targetId: fbUser.uid,
+          summary: `Pendaftaran Admin Sekolah baru: ${cleanName} (${cleanPosition} — ${cleanSchool}, ${cleanEmail})`,
+        });
+      }
+
+      await loadAdminIdentity(fbUser);
+      return targetStatus;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, `admins/${fbUser.uid}`);
     }
   };
 
@@ -496,11 +778,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     try {
       const cred = await signInWithEmailAndPassword(auth, trimmed, pinOrPassword);
-      const ok = await loadAdminIdentity(cred.user);
-      if (!ok) {
+      const res = await loadAdminIdentity(cred.user);
+      if (res !== 'admin') {
         await firebaseSignOut(auth);
         setFirebaseUser(null);
-        setAuthError('Akun ini tidak memiliki hak akses Administrator.');
+        setAuthError('Akun ini belum aktif sebagai Administrator.');
         return false;
       }
       return true;
@@ -511,8 +793,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const refreshProfile = async () => {
-    if (firebaseUser) {
-      await loadAdminIdentity(firebaseUser);
+    if (auth.currentUser) {
+      await loadAdminIdentity(auth.currentUser);
     } else {
       await restoreSavedStudentSession();
     }
@@ -537,7 +819,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setFirebaseUser(null);
     setStudentSession(null);
     setProfile(null);
+    setAdminRecord(null);
     setIsAdmin(false);
+    setIsSuperAdmin(false);
+    setAdminOnboardingState('none');
   };
 
   return (
@@ -546,12 +831,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         firebaseUser,
         studentSession,
         profile,
+        adminRecord,
         isAdmin,
+        isSuperAdmin,
+        adminOnboardingState,
+        registrationSettings,
         authReady,
         authError,
         clearAuthError: () => setAuthError(null),
         signInStudentWithNameAndToken,
         signInWithGoogle,
+        completeSchoolAdminRegistration,
         signInWithCredentials,
         refreshProfile,
         signOut,

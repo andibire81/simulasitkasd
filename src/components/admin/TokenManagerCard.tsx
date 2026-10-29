@@ -12,19 +12,36 @@ import {
   CbtTokenRecord,
   clampStr,
   generateRandomTokenCode,
+  normalizeSchoolName,
   VALIDATION_BOUNDS,
 } from '../../types/cbt';
 
 interface TokenManagerCardProps {
   tokens: CbtTokenRecord[];
+  schoolName?: string;
   compact?: boolean;
 }
 
 export const TokenManagerCard: React.FC<TokenManagerCardProps> = ({
   tokens,
+  schoolName,
   compact = false,
 }) => {
-  const classroomTokens = tokens.filter((t) => !t.scope || t.scope === 'classroom');
+  const effectiveSchool =
+    !schoolName || schoolName === 'ALL' ? 'Semua' : clampStr(schoolName, 120);
+
+  const classroomTokens = tokens.filter((t) => {
+    if (t.scope && t.scope !== 'classroom') return false;
+    if (effectiveSchool === 'Semua') {
+      return (
+        !t.schoolName ||
+        t.schoolName === 'Semua' ||
+        t.schoolName === 'Penyelenggara TKA SD'
+      );
+    }
+    return normalizeSchoolName(t.schoolName || '') === normalizeSchoolName(effectiveSchool);
+  });
+
   const activeToken = classroomTokens.find((t) => t.active) || null;
 
   const [customTokenInput, setCustomTokenInput] = useState('');
@@ -32,6 +49,15 @@ export const TokenManagerCard: React.FC<TokenManagerCardProps> = ({
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const generateUniqueClassroomCode = () => {
+    const used = new Set(tokens.map((t) => t.code));
+    for (let i = 0; i < 40; i++) {
+      const candidate = generateRandomTokenCode(6);
+      if (!used.has(candidate)) return candidate;
+    }
+    return generateRandomTokenCode(8);
+  };
 
   const activateTokenCode = async (rawCode: string) => {
     const cleanCode = rawCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -47,13 +73,15 @@ export const TokenManagerCard: React.FC<TokenManagerCardProps> = ({
     const adminUid = auth.currentUser?.uid;
     if (!adminUid) return;
 
-    // Prevent collision with a personal student token
-    const personalCollision = tokens.find(
-      (t) => t.code === cleanCode && t.scope === 'student'
+    // Prevent collision with a personal student token or another school's classroom token
+    const externalCollision = tokens.find(
+      (t) =>
+        t.code === cleanCode &&
+        (t.scope === 'student' || !classroomTokens.some((ct) => ct.code === t.code))
     );
-    if (personalCollision) {
+    if (externalCollision) {
       setErrorMsg(
-        `Kode ${cleanCode} sedang dipakai sebagai Token Khusus Peserta. Pilih kode lain untuk Token Kelas.`
+        `Kode ${cleanCode} sedang digunakan pada token peserta atau sekolah lain. Pilih kode lain untuk Token Kelas.`
       );
       return;
     }
@@ -61,34 +89,42 @@ export const TokenManagerCard: React.FC<TokenManagerCardProps> = ({
     setBusy(true);
     setErrorMsg(null);
     try {
-      // Deactivate any other currently active classroom token without touching personal student tokens
+      // Deactivate any other currently active classroom token of THIS school only
       for (const t of classroomTokens) {
         if (t.active && t.code !== cleanCode) {
           await updateDoc(doc(db, 'cbtTokens', t.code), {
             label: clampStr(t.label || 'Token Kelas CBT', 120),
             scope: 'classroom',
             studentId: '',
+            schoolName: clampStr(t.schoolName || effectiveSchool, 120),
             active: false,
             updatedAt: serverTimestamp(),
           });
         }
       }
 
+      const tokenLabel =
+        effectiveSchool === 'Semua'
+          ? 'Token Kelas CBT Bersama'
+          : clampStr(`Token Kelas — ${effectiveSchool}`, 120);
+
       const existing = classroomTokens.find((t) => t.code === cleanCode);
       if (existing) {
         await updateDoc(doc(db, 'cbtTokens', cleanCode), {
-          label: clampStr(existing.label || 'Token Kelas CBT', 120),
+          label: tokenLabel,
           scope: 'classroom',
           studentId: '',
+          schoolName: effectiveSchool,
           active: true,
           updatedAt: serverTimestamp(),
         });
       } else {
         await setDoc(doc(db, 'cbtTokens', cleanCode), {
           code: cleanCode,
-          label: 'Token Kelas CBT',
+          label: tokenLabel,
           scope: 'classroom',
           studentId: '',
+          schoolName: effectiveSchool,
           active: true,
           createdBy: adminUid,
           createdAt: serverTimestamp(),
@@ -100,7 +136,7 @@ export const TokenManagerCard: React.FC<TokenManagerCardProps> = ({
         action: 'ACTIVATE_CLASSROOM_TOKEN',
         targetType: 'cbtTokens',
         targetId: cleanCode,
-        summary: `Mengaktifkan Token Kelas CBT: ${cleanCode}`,
+        summary: `Mengaktifkan Token Kelas CBT (${effectiveSchool}): ${cleanCode}`,
       });
 
       setCustomTokenInput('');
@@ -121,6 +157,7 @@ export const TokenManagerCard: React.FC<TokenManagerCardProps> = ({
         label: clampStr(activeToken.label || 'Token Kelas CBT', 120),
         scope: 'classroom',
         studentId: '',
+        schoolName: clampStr(activeToken.schoolName || effectiveSchool, 120),
         active: false,
         updatedAt: serverTimestamp(),
       });
@@ -128,7 +165,7 @@ export const TokenManagerCard: React.FC<TokenManagerCardProps> = ({
         action: 'DEACTIVATE_CLASSROOM_TOKEN',
         targetType: 'cbtTokens',
         targetId: activeToken.code,
-        summary: `Menonaktifkan Token Kelas CBT: ${activeToken.code}`,
+        summary: `Menonaktifkan Token Kelas CBT (${effectiveSchool}): ${activeToken.code}`,
       });
     } catch (error) {
       handleFirestoreError(
@@ -158,7 +195,10 @@ export const TokenManagerCard: React.FC<TokenManagerCardProps> = ({
         <div className="space-y-1">
           <div className="flex items-center gap-2 text-xs font-semibold text-sky-800">
             <KeyRound className="w-4 h-4" />
-            <span>Token Kelas Seragam (Berlaku untuk Siswa yang Sudah Didata &amp; Diberi Akses Token)</span>
+            <span>
+              Token Kelas Seragam —{' '}
+              {effectiveSchool === 'Semua' ? 'Lintas Sekolah' : effectiveSchool}
+            </span>
           </div>
           {!compact && (
             <p className="text-sm text-slate-600">
@@ -203,7 +243,7 @@ export const TokenManagerCard: React.FC<TokenManagerCardProps> = ({
           <button
             type="button"
             disabled={busy}
-            onClick={() => activateTokenCode(generateRandomTokenCode(6))}
+            onClick={() => activateTokenCode(generateUniqueClassroomCode())}
             className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-lg bg-sky-700 text-white text-xs font-semibold hover:bg-sky-800 disabled:opacity-50 whitespace-nowrap shrink-0"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${busy ? 'animate-spin' : ''}`} />

@@ -7,7 +7,7 @@ import React, { Component, ErrorInfo, ReactNode, useEffect, useState } from 'rea
 import { AlertTriangle, Loader2, RefreshCw } from 'lucide-react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { LandingPage } from './components/LandingPage';
-import { AuthView } from './components/AuthView';
+import { AuthPortalMode, AuthView } from './components/AuthView';
 import { StudentDashboard } from './components/StudentDashboard';
 import { CbtExamRunner } from './components/CbtExamRunner';
 import { AdminDashboard } from './components/AdminDashboard';
@@ -77,17 +77,34 @@ class AppErrorBoundary extends Component<
   }
 }
 
+function getInitialPortalModeFromUrl(): AuthPortalMode | null {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const daftar = (params.get('daftar') || params.get('register') || '').toLowerCase();
+    if (daftar === 'admin' || daftar === 'sekolah' || daftar === 'guru') {
+      return 'admin_register';
+    }
+    const portal = (params.get('portal') || '').toLowerCase();
+    if (portal === 'admin') return 'admin';
+    if (portal === 'siswa') return 'student';
+  } catch {
+    // ignore URL parse error
+  }
+  return null;
+}
+
 const AppRouter: React.FC = () => {
   const {
     firebaseUser,
     studentSession,
     profile,
     isAdmin,
+    adminOnboardingState,
     authReady,
   } = useAuth();
 
-  const [authPortalMode, setAuthPortalMode] = useState<'student' | 'admin' | null>(
-    null
+  const [authPortalMode, setAuthPortalMode] = useState<AuthPortalMode | null>(() =>
+    getInitialPortalModeFromUrl()
   );
   const [adminViewingStudentPortal, setAdminViewingStudentPortal] = useState(false);
   const [activeSession, setActiveSession] = useState<{
@@ -98,6 +115,20 @@ const AppRouter: React.FC = () => {
   const isAuthenticatedAdmin = Boolean(firebaseUser && isAdmin);
   const isAuthenticatedStudent = Boolean(studentSession && profile);
   const isSignedIn = isAuthenticatedAdmin || isAuthenticatedStudent;
+  const isOnboardingTeacher = Boolean(
+    firebaseUser && !isAdmin && adminOnboardingState !== 'none'
+  );
+
+  // Clean URL query param once Admin is authenticated
+  useEffect(() => {
+    if (isAuthenticatedAdmin && window.location.search) {
+      try {
+        window.history.replaceState({}, '', window.location.pathname);
+      } catch {
+        // ignore
+      }
+    }
+  }, [isAuthenticatedAdmin]);
 
   // Reset active session on sign-out
   useEffect(() => {
@@ -116,6 +147,17 @@ const AppRouter: React.FC = () => {
     );
   }
 
+  // Signed in with Google but completing School Admin registration / checking approval
+  if (isOnboardingTeacher) {
+    return (
+      <AuthView
+        mode="admin_register"
+        onSwitchMode={(m) => setAuthPortalMode(m)}
+        onBackHome={() => setAuthPortalMode(null)}
+      />
+    );
+  }
+
   // Not signed in -> Landing Page or Auth Portal
   if (!isSignedIn) {
     if (authPortalMode) {
@@ -123,7 +165,16 @@ const AppRouter: React.FC = () => {
         <AuthView
           mode={authPortalMode}
           onSwitchMode={(m) => setAuthPortalMode(m)}
-          onBackHome={() => setAuthPortalMode(null)}
+          onBackHome={() => {
+            if (window.location.search) {
+              try {
+                window.history.replaceState({}, '', window.location.pathname);
+              } catch {
+                // ignore
+              }
+            }
+            setAuthPortalMode(null);
+          }}
         />
       );
     }
@@ -131,6 +182,7 @@ const AppRouter: React.FC = () => {
       <LandingPage
         onOpenStudentLogin={() => setAuthPortalMode('student')}
         onOpenAdminLogin={() => setAuthPortalMode('admin')}
+        onOpenAdminRegister={() => setAuthPortalMode('admin_register')}
       />
     );
   }

@@ -58,6 +58,7 @@ interface AdminPdfAndVerificationProps {
   assets: AssetRecord[];
   answerKeys: AnswerKeyRecord[];
   exams: ExamRecord[];
+  isSuperAdmin?: boolean;
   onSwitchTab: (
     tab: 'pdf_import' | 'question_bank' | 'verify_questions' | 'verify_images'
   ) => void;
@@ -83,8 +84,13 @@ export const AdminPdfAndVerification: React.FC<AdminPdfAndVerificationProps> = (
   assets,
   answerKeys,
   exams,
+  isSuperAdmin = false,
   onSwitchTab,
 }) => {
+  const isLockedSharedQuestion = (q: QuestionRecord) =>
+    !isSuperAdmin &&
+    (q.examPackId === TO1_PACK_ID || q.examPackId === BINDO2_PACK_ID) &&
+    q.verificationStatus === VerificationStatus.VERIFIED;
   // PDF Import state
   const [to1Status, setTo1Status] = useState<{
     available: boolean;
@@ -437,10 +443,15 @@ export const AdminPdfAndVerification: React.FC<AdminPdfAndVerificationProps> = (
   };
 
   const handleBatchVerifyAllQuestions = async () => {
+    const editableQuestions = sortedQuestions.filter((q) => !isLockedSharedQuestion(q));
+    if (editableQuestions.length === 0) {
+      setConfirmBatchVerify(false);
+      return;
+    }
     setBusyVerify(true);
     try {
       const b = writeBatch(db);
-      for (const q of sortedQuestions) {
+      for (const q of editableQuestions) {
         b.update(doc(db, 'questions', q.id), {
           textVerified: true,
           imageVerified: true,
@@ -448,18 +459,20 @@ export const AdminPdfAndVerification: React.FC<AdminPdfAndVerificationProps> = (
           updatedAt: serverTimestamp(),
         });
       }
-      for (const a of assets) {
-        b.update(doc(db, 'assets', a.id), {
-          verified: true,
-          updatedAt: serverTimestamp(),
-        });
+      if (isSuperAdmin) {
+        for (const a of assets) {
+          b.update(doc(db, 'assets', a.id), {
+            verified: true,
+            updatedAt: serverTimestamp(),
+          });
+        }
       }
       await b.commit();
       await recordAuditLog({
         action: 'BATCH_VERIFY_ALL_QUESTIONS',
         targetType: 'questions',
         targetId: TO1_PACK_ID,
-        summary: `Menandai seluruh ${sortedQuestions.length} soal dan ${assets.length} aset gambar telah diperiksa dan TERVERIFIKASI.`,
+        summary: `Menandai ${editableQuestions.length} soal telah diperiksa dan TERVERIFIKASI.`,
       });
       setConfirmBatchVerify(false);
     } catch (error) {
@@ -612,23 +625,29 @@ export const AdminPdfAndVerification: React.FC<AdminPdfAndVerificationProps> = (
                 <ExternalLink className="w-4 h-4" />
                 Lihat PDF Asli
               </a>
-              <button
-                type="button"
-                disabled={importingTo1 || importingBindo2}
-                onClick={handleImportTo1Pdf}
-                className="px-5 py-2.5 rounded-lg bg-sky-700 text-white text-sm font-semibold hover:bg-sky-800 disabled:opacity-60 inline-flex items-center gap-2 whitespace-nowrap shrink-0"
-              >
-                {importingTo1 ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    Memproses ke Database...
-                  </>
-                ) : to1CountInDb > 0 ? (
-                  'Sinkronkan Ulang 30 Soal TO 1 MTK.pdf'
-                ) : (
-                  'Impor 30 Soal Asli TO 1 MTK.pdf ke Database'
-                )}
-              </button>
+              {!isSuperAdmin && to1CountInDb >= 30 ? (
+                <span className="px-4 py-2.5 rounded-lg border border-emerald-200 bg-emerald-50 text-sm font-semibold text-emerald-800 whitespace-nowrap shrink-0">
+                  ✓ 30 Soal Bersama Siap Dipakai Sekolah Anda
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  disabled={importingTo1 || importingBindo2}
+                  onClick={handleImportTo1Pdf}
+                  className="px-5 py-2.5 rounded-lg bg-sky-700 text-white text-sm font-semibold hover:bg-sky-800 disabled:opacity-60 inline-flex items-center gap-2 whitespace-nowrap shrink-0"
+                >
+                  {importingTo1 ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Memproses ke Database...
+                    </>
+                  ) : to1CountInDb > 0 ? (
+                    'Sinkronkan Ulang 30 Soal TO 1 MTK.pdf'
+                  ) : (
+                    'Impor 30 Soal Asli TO 1 MTK.pdf ke Database'
+                  )}
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -669,23 +688,29 @@ export const AdminPdfAndVerification: React.FC<AdminPdfAndVerificationProps> = (
                 <ExternalLink className="w-4 h-4" />
                 Lihat PDF Asli
               </a>
-              <button
-                type="button"
-                disabled={importingBindo2 || importingTo1}
-                onClick={handleImportBindo2Pdf}
-                className="px-5 py-2.5 rounded-lg bg-blue-700 text-white text-sm font-semibold hover:bg-blue-800 disabled:opacity-60 inline-flex items-center gap-2 whitespace-nowrap shrink-0"
-              >
-                {importingBindo2 ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    Memproses ke Database...
-                  </>
-                ) : bindo2CountInDb > 0 ? (
-                  'Sinkronkan Ulang 30 Soal B.Indo 2.pdf'
-                ) : (
-                  'Impor 30 Soal Asli B.Indo 2.pdf ke Database'
-                )}
-              </button>
+              {!isSuperAdmin && bindo2CountInDb >= 30 ? (
+                <span className="px-4 py-2.5 rounded-lg border border-emerald-200 bg-emerald-50 text-sm font-semibold text-emerald-800 whitespace-nowrap shrink-0">
+                  ✓ 30 Soal Bersama Siap Dipakai Sekolah Anda
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  disabled={importingBindo2 || importingTo1}
+                  onClick={handleImportBindo2Pdf}
+                  className="px-5 py-2.5 rounded-lg bg-blue-700 text-white text-sm font-semibold hover:bg-blue-800 disabled:opacity-60 inline-flex items-center gap-2 whitespace-nowrap shrink-0"
+                >
+                  {importingBindo2 ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Memproses ke Database...
+                    </>
+                  ) : bindo2CountInDb > 0 ? (
+                    'Sinkronkan Ulang 30 Soal B.Indo 2.pdf'
+                  ) : (
+                    'Impor 30 Soal Asli B.Indo 2.pdf ke Database'
+                  )}
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -1053,13 +1078,15 @@ export const AdminPdfAndVerification: React.FC<AdminPdfAndVerificationProps> = (
                       >
                         Periksa
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => setEditingQuestion(JSON.parse(JSON.stringify(q)))}
-                        className="px-2.5 py-1.5 rounded border border-slate-300 text-xs font-semibold text-sky-800 hover:bg-sky-50"
-                      >
-                        Edit / Bobot
-                      </button>
+                      {!isLockedSharedQuestion(q) && (
+                        <button
+                          type="button"
+                          onClick={() => setEditingQuestion(JSON.parse(JSON.stringify(q)))}
+                          className="px-2.5 py-1.5 rounded border border-slate-300 text-xs font-semibold text-sky-800 hover:bg-sky-50"
+                        >
+                          Edit / Bobot
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -1431,39 +1458,51 @@ export const AdminPdfAndVerification: React.FC<AdminPdfAndVerificationProps> = (
 
             {/* Admin Verification Actions */}
             <div className="pt-4 border-t border-slate-200 space-y-3">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Catatan Pemeriksaan Admin (Opsional)
-                </label>
-                <input
-                  type="text"
-                  value={verifNotesInput}
-                  onChange={(e) => setVerifNotesInput(e.target.value)}
-                  placeholder="Contoh: Bunyi soal, pecahan, dan gambar sesuai halaman asli."
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"
-                />
-              </div>
+              {isLockedSharedQuestion(currentQ) ? (
+                <div className="p-3.5 rounded-lg border border-emerald-200 bg-emerald-50 text-xs text-emerald-900">
+                  <strong>✓ Paket Soal Utama Bersama:</strong> Soal dan gambar ini telah terverifikasi sesuai dokumen PDF sumber dan siap digunakan langsung oleh seluruh sekolah tanpa perlu diubah.
+                </div>
+              ) : (
+                <>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Catatan Pemeriksaan Admin (Opsional)
+                    </label>
+                    <input
+                      type="text"
+                      value={verifNotesInput}
+                      onChange={(e) => setVerifNotesInput(e.target.value)}
+                      placeholder="Contoh: Bunyi soal, pecahan, dan gambar sesuai halaman asli."
+                      className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"
+                    />
+                  </div>
 
-              <div className="flex flex-wrap items-center gap-2.5">
-                <button
-                  type="button"
-                  disabled={busyVerify}
-                  onClick={() => handleUpdateQuestionVerification(currentQ, true, true, false)}
-                  className="px-4 py-2.5 rounded-lg bg-emerald-700 text-white text-sm font-semibold hover:bg-emerald-800 disabled:opacity-60 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
-                >
-                  <CheckCircle2 className="w-4 h-4" />
-                  Tandai Soal & Gambar Terverifikasi
-                </button>
-                <button
-                  type="button"
-                  disabled={busyVerify}
-                  onClick={() => handleUpdateQuestionVerification(currentQ, false, false, true)}
-                  className="px-4 py-2.5 rounded-lg border border-red-300 bg-red-50 text-red-800 text-sm font-semibold hover:bg-red-100 disabled:opacity-60 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
-                >
-                  <AlertTriangle className="w-4 h-4" />
-                  Tandai Perlu Perbaikan
-                </button>
-              </div>
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    <button
+                      type="button"
+                      disabled={busyVerify}
+                      onClick={() =>
+                        handleUpdateQuestionVerification(currentQ, true, true, false)
+                      }
+                      className="px-4 py-2.5 rounded-lg bg-emerald-700 text-white text-sm font-semibold hover:bg-emerald-800 disabled:opacity-60 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                    >
+                      <CheckCircle2 className="w-4 h-4" />
+                      Tandai Soal &amp; Gambar Terverifikasi
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busyVerify}
+                      onClick={() =>
+                        handleUpdateQuestionVerification(currentQ, false, false, true)
+                      }
+                      className="px-4 py-2.5 rounded-lg border border-red-300 bg-red-50 text-red-800 text-sm font-semibold hover:bg-red-100 disabled:opacity-60 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                    >
+                      <AlertTriangle className="w-4 h-4" />
+                      Tandai Perlu Perbaikan
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
 
@@ -1676,37 +1715,45 @@ export const AdminPdfAndVerification: React.FC<AdminPdfAndVerificationProps> = (
                 )}
 
                 <div className="pt-4 border-t border-slate-200 flex flex-wrap gap-2.5">
-                  <button
-                    type="button"
-                    disabled={busyVerify}
-                    onClick={() =>
-                      handleUpdateQuestionVerification(
-                        currentImgQ,
-                        currentImgQ.textVerified,
-                        true,
-                        false
-                      )
-                    }
-                    className="px-4 py-2 rounded-lg bg-emerald-700 text-white text-sm font-semibold hover:bg-emerald-800 inline-flex items-center gap-1.5"
-                  >
-                    <CheckCircle2 className="w-4 h-4" />
-                    Tandai Gambar Terverifikasi
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busyVerify}
-                    onClick={() =>
-                      handleUpdateQuestionVerification(
-                        currentImgQ,
-                        currentImgQ.textVerified,
-                        false,
-                        true
-                      )
-                    }
-                    className="px-4 py-2 rounded-lg border border-amber-300 bg-amber-50 text-amber-900 text-sm font-semibold hover:bg-amber-100"
-                  >
-                    Tandai Belum Terverifikasi
-                  </button>
+                  {isLockedSharedQuestion(currentImgQ) ? (
+                    <span className="text-xs font-semibold text-emerald-800">
+                      ✓ Gambar Paket Soal Bersama telah terverifikasi dan dikunci agar konsisten bagi seluruh sekolah.
+                    </span>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        disabled={busyVerify}
+                        onClick={() =>
+                          handleUpdateQuestionVerification(
+                            currentImgQ,
+                            currentImgQ.textVerified,
+                            true,
+                            false
+                          )
+                        }
+                        className="px-4 py-2 rounded-lg bg-emerald-700 text-white text-sm font-semibold hover:bg-emerald-800 inline-flex items-center gap-1.5"
+                      >
+                        <CheckCircle2 className="w-4 h-4" />
+                        Tandai Gambar Terverifikasi
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busyVerify}
+                        onClick={() =>
+                          handleUpdateQuestionVerification(
+                            currentImgQ,
+                            currentImgQ.textVerified,
+                            false,
+                            true
+                          )
+                        }
+                        className="px-4 py-2 rounded-lg border border-amber-300 bg-amber-50 text-amber-900 text-sm font-semibold hover:bg-amber-100"
+                      >
+                        Tandai Belum Terverifikasi
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -1715,7 +1762,7 @@ export const AdminPdfAndVerification: React.FC<AdminPdfAndVerificationProps> = (
                 <div className="flex items-center justify-between pb-3 border-b border-slate-200">
                   <h3 className="text-sm font-bold text-slate-900 inline-flex items-center gap-1.5">
                     <Sliders className="w-4 h-4 text-sky-700" />
-                    Bandingkan Halaman PDF & Potong Ulang Jika Diperlukan
+                    Bandingkan Halaman PDF &amp; Potong Ulang Jika Diperlukan
                   </h3>
                   <span className="text-xs font-mono-tabular text-slate-500">
                     Hal. {currentImgQ.sourcePage}
@@ -1729,81 +1776,95 @@ export const AdminPdfAndVerification: React.FC<AdminPdfAndVerificationProps> = (
                     referrerPolicy="no-referrer"
                     className="w-full max-h-[460px] object-contain block"
                   />
-                  <div
-                    style={{
-                      left: `${cropX}%`,
-                      top: `${cropY}%`,
-                      width: `${cropW}%`,
-                      height: `${cropH}%`,
-                    }}
-                    className="absolute border-2 border-sky-600 bg-sky-500/15 pointer-events-none"
-                  />
+                  {!isLockedSharedQuestion(currentImgQ) && (
+                    <div
+                      style={{
+                        left: `${cropX}%`,
+                        top: `${cropY}%`,
+                        width: `${cropW}%`,
+                        height: `${cropH}%`,
+                      }}
+                      className="absolute border-2 border-sky-600 bg-sky-500/15 pointer-events-none"
+                    />
+                  )}
                 </div>
 
-                <div className="grid grid-cols-2 gap-3 text-xs">
-                  <label className="space-y-1">
-                    <span className="font-semibold text-slate-700">Posisi Kiri X: {cropX}%</span>
-                    <input
-                      type="range"
-                      min={0}
-                      max={90}
-                      value={cropX}
-                      onChange={(e) => setCropX(Number(e.target.value))}
-                      className="w-full"
-                    />
-                  </label>
-                  <label className="space-y-1">
-                    <span className="font-semibold text-slate-700">Posisi Atas Y: {cropY}%</span>
-                    <input
-                      type="range"
-                      min={0}
-                      max={90}
-                      value={cropY}
-                      onChange={(e) => setCropY(Number(e.target.value))}
-                      className="w-full"
-                    />
-                  </label>
-                  <label className="space-y-1">
-                    <span className="font-semibold text-slate-700">Lebar Area: {cropW}%</span>
-                    <input
-                      type="range"
-                      min={10}
-                      max={100 - cropX}
-                      value={cropW}
-                      onChange={(e) => setCropW(Number(e.target.value))}
-                      className="w-full"
-                    />
-                  </label>
-                  <label className="space-y-1">
-                    <span className="font-semibold text-slate-700">Tinggi Area: {cropH}%</span>
-                    <input
-                      type="range"
-                      min={8}
-                      max={100 - cropY}
-                      value={cropH}
-                      onChange={(e) => setCropH(Number(e.target.value))}
-                      className="w-full"
-                    />
-                  </label>
-                </div>
+                {!isLockedSharedQuestion(currentImgQ) && (
+                  <>
+                    <div className="grid grid-cols-2 gap-3 text-xs">
+                      <label className="space-y-1">
+                        <span className="font-semibold text-slate-700">
+                          Posisi Kiri X: {cropX}%
+                        </span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={90}
+                          value={cropX}
+                          onChange={(e) => setCropX(Number(e.target.value))}
+                          className="w-full"
+                        />
+                      </label>
+                      <label className="space-y-1">
+                        <span className="font-semibold text-slate-700">
+                          Posisi Atas Y: {cropY}%
+                        </span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={90}
+                          value={cropY}
+                          onChange={(e) => setCropY(Number(e.target.value))}
+                          className="w-full"
+                        />
+                      </label>
+                      <label className="space-y-1">
+                        <span className="font-semibold text-slate-700">
+                          Lebar Area: {cropW}%
+                        </span>
+                        <input
+                          type="range"
+                          min={10}
+                          max={100 - cropX}
+                          value={cropW}
+                          onChange={(e) => setCropW(Number(e.target.value))}
+                          className="w-full"
+                        />
+                      </label>
+                      <label className="space-y-1">
+                        <span className="font-semibold text-slate-700">
+                          Tinggi Area: {cropH}%
+                        </span>
+                        <input
+                          type="range"
+                          min={8}
+                          max={100 - cropY}
+                          value={cropH}
+                          onChange={(e) => setCropH(Number(e.target.value))}
+                          className="w-full"
+                        />
+                      </label>
+                    </div>
 
-                {cropMessage && (
-                  <div className="p-3 rounded-lg border border-sky-200 bg-sky-50 text-xs text-sky-900">
-                    {cropMessage}
-                  </div>
+                    {cropMessage && (
+                      <div className="p-3 rounded-lg border border-sky-200 bg-sky-50 text-xs text-sky-900">
+                        {cropMessage}
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      disabled={croppingBusy}
+                      onClick={() => handleInteractiveReCrop(currentImgQ)}
+                      className="px-4 py-2 rounded-lg border border-slate-300 bg-slate-50 text-xs font-semibold text-slate-800 hover:bg-slate-100 inline-flex items-center gap-1.5"
+                    >
+                      <Crop className="w-3.5 h-3.5" />
+                      {croppingBusy
+                        ? 'Memotong Resolusi Tinggi...'
+                        : 'Gunakan Area Kotak Biru sebagai Gambar Utama'}
+                    </button>
+                  </>
                 )}
-
-                <button
-                  type="button"
-                  disabled={croppingBusy}
-                  onClick={() => handleInteractiveReCrop(currentImgQ)}
-                  className="px-4 py-2 rounded-lg border border-slate-300 bg-slate-50 text-xs font-semibold text-slate-800 hover:bg-slate-100 inline-flex items-center gap-1.5"
-                >
-                  <Crop className="w-3.5 h-3.5" />
-                  {croppingBusy
-                    ? 'Memotong Resolusi Tinggi...'
-                    : 'Gunakan Area Kotak Biru sebagai Gambar Utama'}
-                </button>
               </div>
             </div>
           )}

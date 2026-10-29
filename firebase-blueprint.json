@@ -2,17 +2,33 @@
   "entities": {
     "Admin": {
       "title": "Admin",
-      "description": "Authorized CBT administrator or proctor authenticated via verified Google account.",
+      "description": "Authorized CBT school administrator or proctor authenticated via verified Google account.",
       "type": "object",
       "properties": {
         "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
         "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 150 },
         "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "schoolName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "position": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "status": { "type": "string", "enum": ["active", "pending", "suspended"], "maxLength": 20 },
         "createdBy": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "email", "fullName", "createdBy", "createdAt", "updatedAt"]
+    },
+    "AdminSettings": {
+      "title": "AdminSettings",
+      "description": "Global school admin registration mode managed exclusively by the Bootstrapped Super Admin.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "mode": { "type": "string", "enum": ["open", "approval", "closed"], "maxLength": 20 },
+        "welcomeNote": { "type": "string", "maxLength": 500 },
+        "updatedBy": { "type": "string", "minLength": 1, "maxLength": 150 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "mode", "welcomeNote", "updatedBy", "updatedAt"]
     },
     "User": {
       "title": "User",
@@ -56,6 +72,7 @@
         "schoolName": { "type": "string", "minLength": 1, "maxLength": 120 },
         "tokenStatus": { "type": "string", "enum": ["issued", "withheld"], "maxLength": 20 },
         "accountStatus": { "type": "string", "enum": ["active", "inactive"], "maxLength": 20 },
+        "createdBy": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -81,6 +98,7 @@
         "label": { "type": "string", "minLength": 1, "maxLength": 120 },
         "scope": { "type": "string", "enum": ["classroom", "student"], "maxLength": 20 },
         "studentId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]*$" },
+        "schoolName": { "type": "string", "maxLength": 120 },
         "active": { "type": "boolean" },
         "createdBy": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
         "createdAt": { "type": "string", "format": "date-time" },
@@ -284,6 +302,8 @@
         "showDiscussion": { "type": "boolean" },
         "publishScore": { "type": "boolean" },
         "sourcePdfName": { "type": "string", "maxLength": 200 },
+        "schoolName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "createdBy": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -525,7 +545,11 @@
   "firestore": {
     "/admins/{adminId}": {
       "schema": { "$ref": "#/entities/Admin" },
-      "description": "Authorized CBT administrators."
+      "description": "Authorized CBT school administrators."
+    },
+    "/adminSettings/{settingId}": {
+      "schema": { "$ref": "#/entities/AdminSettings" },
+      "description": "Global school admin registration policy controlled by Super Admin."
     },
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/User" },

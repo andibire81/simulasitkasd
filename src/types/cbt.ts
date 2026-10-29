@@ -45,6 +45,8 @@ export const VALIDATION_BOUNDS = {
   PARTICIPANT_NUMBER_MAX_LEN: 40,
   CLASS_MAX_LEN: 30,
   SCHOOL_MAX_LEN: 120,
+  POSITION_MAX_LEN: 80,
+  WELCOME_NOTE_MAX_LEN: 500,
   EMAIL_MAX_LEN: 150,
   STEM_MAX_LEN: 8000,
   INSTRUCTION_MAX_LEN: 500,
@@ -174,11 +176,38 @@ export function sha256Hex(input: string): string {
 }
 
 /**
- * Computes the deterministic StudentDirectory document ID from a student's full name.
+ * Normalizes a school name for consistent comparison and school-scoped student IDs.
+ */
+export function normalizeSchoolName(raw: string): string {
+  return (raw || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+    .slice(0, VALIDATION_BOUNDS.SCHOOL_MAX_LEN);
+}
+
+/**
+ * Computes the deterministic legacy StudentDirectory document ID from a student's full name.
  */
 export function computeStudentDocId(fullName: string): string {
   const norm = normalizeStudentName(fullName);
   return `stu_${sha256Hex(norm).slice(0, 24)}`;
+}
+
+/**
+ * Computes a school-scoped deterministic StudentDirectory document ID so multiple schools
+ * can independently register students who happen to share the same full name.
+ */
+export function computeStudentDocIdForSchool(
+  fullName: string,
+  schoolName?: string
+): string {
+  const normName = normalizeStudentName(fullName);
+  const normSchool = normalizeSchoolName(schoolName || '');
+  if (!normSchool || normSchool === 'penyelenggara tka sd') {
+    return computeStudentDocId(fullName);
+  }
+  return `stu_${sha256Hex(`${normSchool}::${normName}`).slice(0, 24)}`;
 }
 
 /**
@@ -251,6 +280,7 @@ export interface StudentDirectoryRecord {
   schoolName: string;
   tokenStatus?: 'issued' | 'withheld';
   accountStatus: 'active' | 'inactive';
+  createdBy?: string;
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
 }
@@ -260,6 +290,7 @@ export interface CbtTokenRecord {
   label: string;
   scope: 'classroom' | 'student';
   studentId: string;
+  schoolName?: string;
   active: boolean;
   createdBy: string;
   createdAt?: Timestamp;
@@ -284,10 +315,23 @@ export interface StudentSessionRecord {
   expiresAt: Timestamp;
 }
 
+export type AdminRegistrationMode = 'open' | 'approval' | 'closed';
+
+export interface AdminRegistrationSettingsRecord {
+  id: string;
+  mode: AdminRegistrationMode;
+  welcomeNote: string;
+  updatedBy: string;
+  updatedAt?: Timestamp;
+}
+
 export interface AdminRecord {
   uid: string;
   email: string;
   fullName: string;
+  schoolName?: string;
+  position?: string;
+  status?: 'active' | 'pending' | 'suspended';
   createdBy: string;
   createdAt: Timestamp;
   updatedAt: Timestamp;
@@ -362,6 +406,8 @@ export interface ExamRecord {
   showDiscussion: boolean;
   publishScore: boolean;
   sourcePdfName: string;
+  schoolName?: string;
+  createdBy?: string;
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
 }

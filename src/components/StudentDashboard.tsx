@@ -25,6 +25,7 @@ import {
   AttemptStatus,
   ExamRecord,
   ExamStatus,
+  normalizeSchoolName,
   QuestionRecord,
   ResponseRecord,
 } from '../types/cbt';
@@ -140,6 +141,14 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({
               ex.status === ExamStatus.WAITING ||
               ex.status === ExamStatus.ACTIVE ||
               ex.status === ExamStatus.FINISHED
+          )
+          .filter(
+            (ex) =>
+              !ex.schoolName ||
+              ex.schoolName === 'Semua' ||
+              normalizeSchoolName(ex.schoolName) ===
+                normalizeSchoolName(profile.schoolName) ||
+              profile.className === 'ADMIN'
           )
           .filter(
             (ex) =>

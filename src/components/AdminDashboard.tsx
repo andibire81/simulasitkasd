@@ -6,14 +6,18 @@ import {
   onSnapshot,
   serverTimestamp,
   setDoc,
+  Timestamp,
   updateDoc,
 } from 'firebase/firestore';
 import {
   AlertTriangle,
   ArrowRight,
   BookOpen,
+  Building2,
+  Check,
   CheckCircle2,
   ClipboardCheck,
+  Copy,
   FileSpreadsheet,
   FileText,
   FileUp,
@@ -25,6 +29,7 @@ import {
   Menu,
   Printer,
   Settings,
+  Share2,
   Shield,
   Sparkles,
   Users,
@@ -36,6 +41,7 @@ import {
   db,
   handleFirestoreError,
   OperationType,
+  recordAuditLog,
   syncPublishedExamsPortalIndex,
 } from '../lib/firebase';
 import {
@@ -46,16 +52,21 @@ import {
   AuditLogRecord,
   CbtPortalRecord,
   CbtTokenRecord,
+  clampStr,
   ExamGradeRecord,
   ExamRecord,
   ExamStatus,
+  normalizeSchoolName,
   QuestionRecord,
   ResponseRecord,
+  sanitizeId,
   StudentDirectoryRecord,
   UserProfile,
   VerificationStatus,
 } from '../types/cbt';
 import { evaluateAttemptGrades } from '../lib/gradingEngine';
+import { TO1_PACK_ID, TO1_SOURCE_PDF_NAME } from '../data/to1MtkSource';
+import { BINDO2_PACK_ID, BINDO2_SOURCE_PDF_NAME } from '../data/bindo2Source';
 import {
   syncTo1QuestionsAndAnswerKeysToFirestore,
   TO1_MTK_ANSWER_KEYS,
@@ -104,9 +115,27 @@ interface NavGroup {
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onOpenStudentPreview,
 }) => {
-  const { isAdmin, firebaseUser, signOut } = useAuth();
+  const {
+    isAdmin,
+    isSuperAdmin,
+    firebaseUser,
+    profile,
+    adminRecord,
+    registrationSettings,
+    signOut,
+  } = useAuth();
   const [activeMenu, setActiveMenu] = useState<AdminMenuId>('overview');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [selectedSchoolFilter, setSelectedSchoolFilter] = useState<string>('ALL');
+  const [copiedInviteLink, setCopiedInviteLink] = useState(false);
+  const [quickSetupBusy, setQuickSetupBusy] = useState(false);
+  const [quickSetupMessage, setQuickSetupMessage] = useState<string | null>(null);
+
+  const adminSchoolName = (
+    adminRecord?.schoolName ||
+    profile?.schoolName ||
+    'Penyelenggara TKA SD'
+  ).trim();
 
   // Real-time Firestore state
   const [users, setUsers] = useState<UserProfile[]>([]);
@@ -249,26 +278,42 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     const needsAutoSeedTo1 = TO1_MTK_ANSWER_KEYS.some((seed) => {
       const q = existingQMap.get(seed.questionId);
       const k = existingKMap.get(seed.questionId);
+      if (isSuperAdmin) {
+        return (
+          !q ||
+          q.verificationStatus !== VerificationStatus.VERIFIED ||
+          !q.answerKeyVerified ||
+          !k ||
+          !k.verified ||
+          !k.discussion
+        );
+      }
       return (
         !q ||
         q.verificationStatus !== VerificationStatus.VERIFIED ||
-        !q.answerKeyVerified ||
         !k ||
-        !k.verified ||
-        !k.discussion
+        !k.verified
       );
     });
 
     const needsAutoSeedBindo2 = BINDO2_ANSWER_KEYS.some((seed) => {
       const q = existingQMap.get(seed.questionId);
       const k = existingKMap.get(seed.questionId);
+      if (isSuperAdmin) {
+        return (
+          !q ||
+          q.verificationStatus !== VerificationStatus.VERIFIED ||
+          !q.answerKeyVerified ||
+          !k ||
+          !k.verified ||
+          !k.discussion
+        );
+      }
       return (
         !q ||
         q.verificationStatus !== VerificationStatus.VERIFIED ||
-        !q.answerKeyVerified ||
         !k ||
-        !k.verified ||
-        !k.discussion
+        !k.verified
       );
     });
 
@@ -297,6 +342,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     })().catch((err) => console.warn('Auto-sync TKA SD AI keys warning:', err));
   }, [
     isAdmin,
+    isSuperAdmin,
     questionsLoaded,
     assetsLoaded,
     keysLoaded,
@@ -450,7 +496,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           ex.status === ExamStatus.FINISHED
       )
       .map((ex) => ex.id)
-      .slice(0, 50);
+      .slice(0, 500);
 
     const same =
       expectedIds.length === portalExamIds.length &&
@@ -463,18 +509,266 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   }, [isAdmin, examsLoaded, exams, portalExamIds]);
 
-  // Live Overview Metrics
+  // Distinct registered schools across Admins, Students & Exams
+  const availableSchools = useMemo(() => {
+    const byNorm = new Map<string, string>();
+    const register = (raw?: string) => {
+      const trimmed = (raw || '').trim();
+      if (!trimmed || trimmed === 'Semua' || trimmed === 'Penyelenggara TKA SD') return;
+      const norm = normalizeSchoolName(trimmed);
+      if (norm && !byNorm.has(norm)) {
+        byNorm.set(norm, trimmed);
+      }
+    };
+    admins.forEach((a) => register(a.schoolName));
+    studentDirectory.forEach((s) => register(s.schoolName));
+    exams.forEach((ex) => register(ex.schoolName));
+    return Array.from(byNorm.values()).sort((a, b) => a.localeCompare(b, 'id'));
+  }, [admins, studentDirectory, exams]);
+
+  const effectiveSchool = isSuperAdmin ? selectedSchoolFilter : adminSchoolName;
+
+  // Multi-school scoped datasets
+  const scopedStudents = useMemo(() => {
+    if (isSuperAdmin && effectiveSchool === 'ALL') return studentDirectory;
+    const targetNorm = normalizeSchoolName(effectiveSchool);
+    return studentDirectory.filter(
+      (s) => normalizeSchoolName(s.schoolName) === targetNorm
+    );
+  }, [isSuperAdmin, effectiveSchool, studentDirectory]);
+
+  const scopedExams = useMemo(() => {
+    if (isSuperAdmin && effectiveSchool === 'ALL') return exams;
+    const targetNorm = normalizeSchoolName(effectiveSchool);
+    return exams.filter(
+      (ex) =>
+        !ex.schoolName ||
+        ex.schoolName === 'Semua' ||
+        normalizeSchoolName(ex.schoolName) === targetNorm
+    );
+  }, [isSuperAdmin, effectiveSchool, exams]);
+
+  const scopedAttempts = useMemo(() => {
+    if (isSuperAdmin && effectiveSchool === 'ALL') return attempts;
+    const targetNorm = normalizeSchoolName(effectiveSchool);
+    return attempts.filter(
+      (att) => normalizeSchoolName(att.schoolName) === targetNorm
+    );
+  }, [isSuperAdmin, effectiveSchool, attempts]);
+
+  const scopedGrades = useMemo(() => {
+    if (isSuperAdmin && effectiveSchool === 'ALL') return examGrades;
+    const attemptIds = new Set(scopedAttempts.map((a) => a.id));
+    return examGrades.filter((g) => attemptIds.has(g.attemptId));
+  }, [isSuperAdmin, effectiveSchool, scopedAttempts, examGrades]);
+
+  const scopedAuditLogs = useMemo(() => {
+    if (isSuperAdmin && effectiveSchool === 'ALL') return auditLogs;
+    if (isSuperAdmin) {
+      const targetNorm = normalizeSchoolName(effectiveSchool);
+      const schoolAdminUids = new Set(
+        admins
+          .filter((a) => normalizeSchoolName(a.schoolName || '') === targetNorm)
+          .map((a) => a.uid)
+      );
+      return auditLogs.filter(
+        (l) =>
+          schoolAdminUids.has(l.actorUid) ||
+          normalizeSchoolName(l.summary).includes(targetNorm)
+      );
+    }
+    const myEmail = (firebaseUser?.email || '').toLowerCase();
+    return auditLogs.filter(
+      (l) =>
+        l.actorUid === firebaseUser?.uid ||
+        (myEmail && l.actorEmail.toLowerCase() === myEmail)
+    );
+  }, [isSuperAdmin, effectiveSchool, auditLogs, admins, firebaseUser]);
+
+  const pendingAdminCount = useMemo(
+    () => admins.filter((a) => a.status === 'pending').length,
+    [admins]
+  );
+
+  // Check whether the current school already has dedicated Exam schedules
+  const schoolDedicatedExams = useMemo(() => {
+    if (!effectiveSchool || effectiveSchool === 'ALL' || effectiveSchool === 'Penyelenggara TKA SD') {
+      return exams;
+    }
+    const targetNorm = normalizeSchoolName(effectiveSchool);
+    return exams.filter(
+      (ex) => ex.schoolName && normalizeSchoolName(ex.schoolName) === targetNorm
+    );
+  }, [exams, effectiveSchool]);
+
+  const handleCopyRegistrationLink = async () => {
+    const url = `${window.location.origin}/?daftar=admin`;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedInviteLink(true);
+      setTimeout(() => setCopiedInviteLink(false), 2500);
+    } catch {
+      // Fallback ignored safely
+    }
+  };
+
+  const handleQuickCreateSchoolExams = async () => {
+    const targetSchool =
+      effectiveSchool && effectiveSchool !== 'ALL'
+        ? effectiveSchool
+        : adminSchoolName;
+    if (!firebaseUser || !targetSchool || targetSchool === 'ALL') return;
+
+    const mtkIds = questions
+      .filter(
+        (q) =>
+          q.examPackId === TO1_PACK_ID &&
+          q.verificationStatus === VerificationStatus.VERIFIED
+      )
+      .sort((a, b) => a.displayOrder - b.displayOrder)
+      .map((q) => q.id);
+
+    const bindoIds = questions
+      .filter(
+        (q) =>
+          q.examPackId === BINDO2_PACK_ID &&
+          q.verificationStatus === VerificationStatus.VERIFIED
+      )
+      .sort((a, b) => a.displayOrder - b.displayOrder)
+      .map((q) => q.id);
+
+    if (mtkIds.length === 0 && bindoIds.length === 0) {
+      setQuickSetupMessage(
+        'Bank soal sedang disinkronkan. Tunggu beberapa detik lalu klik kembali.'
+      );
+      return;
+    }
+
+    setQuickSetupBusy(true);
+    setQuickSetupMessage(null);
+    try {
+      const schoolSlug = sanitizeId(normalizeSchoolName(targetSchool)).slice(0, 48) || 'sd';
+      const now = new Date();
+      const startTs = Timestamp.fromDate(new Date(now.getTime() - 5 * 60 * 1000));
+      const endTs = Timestamp.fromDate(
+        new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000)
+      );
+      const createdExams: ExamRecord[] = [];
+      const targetNorm = normalizeSchoolName(targetSchool);
+
+      const hasMtk = exams.some(
+        (ex) =>
+          ex.examPackId === TO1_PACK_ID &&
+          ex.schoolName &&
+          normalizeSchoolName(ex.schoolName) === targetNorm
+      );
+      if (!hasMtk && mtkIds.length > 0) {
+        const examId = sanitizeId(`exam_mtk_${schoolSlug}_${Date.now().toString(36)}`);
+        const payload = {
+          id: examId,
+          title: clampStr(`Simulasi TKA Matematika — ${targetSchool}`, 200),
+          description: clampStr(
+            `Paket resmi 30 soal Matematika Kelas VI (${TO1_SOURCE_PDF_NAME}) khusus peserta ${targetSchool}.`,
+            2000
+          ),
+          subject: 'Matematika',
+          targetClass: 'Semua',
+          examPackId: TO1_PACK_ID,
+          questionIds: mtkIds,
+          questionCount: mtkIds.length,
+          durationMinutes: 90,
+          scheduledStart: startTs,
+          scheduledEnd: endTs,
+          status: ExamStatus.ACTIVE,
+          allowRetake: false,
+          shuffleQuestions: false,
+          shuffleOptions: false,
+          showDiscussion: true,
+          publishScore: true,
+          sourcePdfName: TO1_SOURCE_PDF_NAME,
+          schoolName: clampStr(targetSchool, 120),
+          createdBy: firebaseUser.uid,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        };
+        await setDoc(doc(db, 'exams', examId), payload);
+        createdExams.push(payload as unknown as ExamRecord);
+      }
+
+      const hasBindo = exams.some(
+        (ex) =>
+          ex.examPackId === BINDO2_PACK_ID &&
+          ex.schoolName &&
+          normalizeSchoolName(ex.schoolName) === targetNorm
+      );
+      if (!hasBindo && bindoIds.length > 0) {
+        const examId = sanitizeId(`exam_bindo_${schoolSlug}_${Date.now().toString(36)}`);
+        const payload = {
+          id: examId,
+          title: clampStr(`Simulasi TKA Bahasa Indonesia — ${targetSchool}`, 200),
+          description: clampStr(
+            `Paket resmi 30 soal Bahasa Indonesia Kelas VI (${BINDO2_SOURCE_PDF_NAME}) khusus peserta ${targetSchool}.`,
+            2000
+          ),
+          subject: 'Bahasa Indonesia',
+          targetClass: 'Semua',
+          examPackId: BINDO2_PACK_ID,
+          questionIds: bindoIds,
+          questionCount: bindoIds.length,
+          durationMinutes: 90,
+          scheduledStart: startTs,
+          scheduledEnd: endTs,
+          status: ExamStatus.ACTIVE,
+          allowRetake: false,
+          shuffleQuestions: false,
+          shuffleOptions: false,
+          showDiscussion: true,
+          publishScore: true,
+          sourcePdfName: BINDO2_SOURCE_PDF_NAME,
+          schoolName: clampStr(targetSchool, 120),
+          createdBy: firebaseUser.uid,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        };
+        await setDoc(doc(db, 'exams', examId), payload);
+        createdExams.push(payload as unknown as ExamRecord);
+      }
+
+      if (createdExams.length > 0) {
+        await syncPublishedExamsPortalIndex([...exams, ...createdExams]);
+        await recordAuditLog({
+          action: 'QUICK_PROVISION_SCHOOL_EXAMS',
+          targetType: 'exam',
+          targetId: schoolSlug,
+          summary: `Menyiapkan otomatis ${createdExams.length} paket ujian aktif untuk ${targetSchool}.`,
+        });
+        setQuickSetupMessage(
+          `${createdExams.length} paket ujian resmi (Matematika & Bahasa Indonesia) telah aktif untuk ${targetSchool}.`
+        );
+      } else {
+        setQuickSetupMessage(
+          `Paket ujian untuk ${targetSchool} sudah tersedia di Pengaturan Ujian.`
+        );
+      }
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, 'exams');
+    } finally {
+      setQuickSetupBusy(false);
+    }
+  };
+
+  // Live Overview Metrics (scoped to active school view)
   const overviewStats = useMemo(() => {
-    const totalStudents = studentDirectory.length;
-    const totalExams = exams.length;
-    const activeExams = exams.filter((e) => e.status === ExamStatus.ACTIVE).length;
+    const totalStudents = scopedStudents.length;
+    const totalExams = scopedExams.length;
+    const activeExams = scopedExams.filter((e) => e.status === ExamStatus.ACTIVE).length;
 
     const participatedStudentKeys = new Set<string>();
-    attempts.forEach((a) => participatedStudentKeys.add(a.studentUid));
+    scopedAttempts.forEach((a) => participatedStudentKeys.add(a.studentUid));
     const participatedCount = participatedStudentKeys.size;
     const notParticipatedCount = Math.max(0, totalStudents - participatedCount);
 
-    const validGrades = examGrades.filter(
+    const validGrades = scopedGrades.filter(
       (g) => g.gradingStatus !== 'ungraded_missing_keys'
     );
     const avgScore =
@@ -511,7 +805,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       verifiedKeysCount,
       missingKeysCount,
     };
-  }, [studentDirectory, exams, attempts, examGrades, questions, answerKeys]);
+  }, [
+    scopedStudents,
+    scopedExams,
+    scopedAttempts,
+    scopedGrades,
+    questions,
+    answerKeys,
+  ]);
 
   const navGroups: NavGroup[] = [
     {
@@ -563,6 +864,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           id: 'access_settings',
           title: '13. Akun & Hak Akses',
           icon: Shield,
+          badgeCount: isSuperAdmin && pendingAdminCount > 0 ? pendingAdminCount : undefined,
         },
         { id: 'audit_logs', title: '14. Log Aktivitas', icon: FileText },
       ],
@@ -606,30 +908,61 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setMobileMenuOpen(false);
   };
 
+  const registrationModeLabel =
+    registrationSettings?.mode === 'approval'
+      ? 'Persetujuan Manual'
+      : registrationSettings?.mode === 'closed'
+      ? 'Ditutup Sementara'
+      : 'Terbuka Otomatis';
+
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
       {/* Top Header Bar */}
       <header className="sticky top-0 z-30 h-16 bg-white border-b border-slate-200 px-4 lg:px-6 flex items-center justify-between gap-4 no-print">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 min-w-0">
           <button
             type="button"
             onClick={() => setMobileMenuOpen((v) => !v)}
-            className="lg:hidden p-2 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50"
+            className="lg:hidden p-2 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 shrink-0"
             aria-label="Buka navigasi admin"
           >
             {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
           </button>
-          <div>
-            <div className="text-sm sm:text-base font-bold tracking-tight text-slate-900">
+          <div className="min-w-0">
+            <div className="text-sm sm:text-base font-bold tracking-tight text-slate-900 truncate">
               SIMULASI TKA SD — DASHBOARD ADMIN
             </div>
-            <div className="text-xs text-slate-500 hidden sm:block">
-              Panel Pengelolaan Soal PDF, Verifikasi Visual, Pelaksanaan CBT &amp; Rekapitulasi Nilai
+            <div className="text-xs text-slate-500 hidden sm:flex items-center gap-1.5 truncate">
+              <Building2 className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+              <span className="font-medium text-slate-700 truncate">
+                {isSuperAdmin
+                  ? effectiveSchool === 'ALL'
+                    ? `Super Admin · Semua Sekolah (${availableSchools.length} SD)`
+                    : `Filter Sekolah: ${effectiveSchool}`
+                  : adminSchoolName}
+              </span>
             </div>
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2.5 shrink-0">
+          {isSuperAdmin && availableSchools.length > 0 && (
+            <select
+              aria-label="Filter Sekolah Dasar"
+              value={selectedSchoolFilter}
+              onChange={(e) => setSelectedSchoolFilter(e.target.value)}
+              className="hidden xl:block max-w-56 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+            >
+              <option value="ALL">
+                Semua Sekolah ({availableSchools.length})
+              </option>
+              {availableSchools.map((sch) => (
+                <option key={sch} value={sch}>
+                  {sch}
+                </option>
+              ))}
+            </select>
+          )}
           <button
             type="button"
             onClick={onOpenStudentPreview}
@@ -638,7 +971,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             Lihat Portal Siswa
           </button>
           <div className="hidden md:block text-right">
-            <div className="text-xs font-semibold text-slate-900">Administrator</div>
+            <div className="text-xs font-semibold text-slate-900">
+              {isSuperAdmin ? 'Super Admin' : adminRecord?.position || 'Admin Sekolah'}
+            </div>
             <div className="text-[11px] font-mono-tabular text-slate-500">
               {firebaseUser?.email}
             </div>
@@ -662,6 +997,28 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           } lg:static lg:block w-68 shrink-0 bg-white border-r border-slate-200 overflow-y-auto no-print`}
         >
           <nav className="p-4 space-y-5">
+            {isSuperAdmin && availableSchools.length > 0 && (
+              <div className="xl:hidden space-y-1.5 pb-3 border-b border-slate-100">
+                <label className="px-1 text-[11px] font-bold uppercase tracking-wider text-slate-400 block">
+                  Filter Sekolah
+                </label>
+                <select
+                  value={selectedSchoolFilter}
+                  onChange={(e) => setSelectedSchoolFilter(e.target.value)}
+                  className="w-full px-2.5 py-2 text-xs font-medium text-slate-800 bg-slate-50 border border-slate-200 rounded-lg"
+                >
+                  <option value="ALL">
+                    Semua Sekolah ({availableSchools.length})
+                  </option>
+                  {availableSchools.map((sch) => (
+                    <option key={sch} value={sch}>
+                      {sch}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
             {navGroups.map((group) => (
               <div key={group.label} className="space-y-1">
                 <div className="px-3 text-[11px] font-bold uppercase tracking-wider text-slate-400">
@@ -707,17 +1064,124 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           <div className="p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
             {activeMenu === 'overview' && (
               <div className="space-y-6">
-                <div>
-                  <h1 className="text-2xl font-bold text-slate-900">
-                    Ringkasan Sistem Ujian CBT
-                  </h1>
-                  <p className="text-sm text-slate-600 mt-1">
-                    Seluruh angka di bawah ini dihitung secara langsung dari database Cloud Firestore tanpa data tiruan.
-                  </p>
+                <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3">
+                  <div>
+                    <h1 className="text-2xl font-bold text-slate-900">
+                      Ringkasan Sistem Ujian CBT
+                    </h1>
+                    <p className="text-sm text-slate-600 mt-1">
+                      {isSuperAdmin && effectiveSchool === 'ALL'
+                        ? 'Menampilkan data gabungan seluruh sekolah penyelenggara secara langsung dari Cloud Firestore.'
+                        : `Ruang kerja penyelenggara: ${effectiveSchool} — data siswa, token, dan nilai terpisah rapi per sekolah.`}
+                    </p>
+                  </div>
                 </div>
 
-                {/* Active Classroom Token Control */}
-                <TokenManagerCard tokens={cbtTokens} />
+                {/* Multi-School Shareable Registration Banner for Super Admin */}
+                {isSuperAdmin && (
+                  <div className="bg-white border border-blue-200 rounded-xl p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                    <div className="space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-semibold bg-blue-50 text-blue-800 border border-blue-200">
+                          <Share2 className="w-3.5 h-3.5" />
+                          Publikasi Multi-Sekolah
+                        </span>
+                        <span className="px-2 py-0.5 rounded text-xs font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                          Mode: {registrationModeLabel}
+                        </span>
+                        <span className="text-xs font-mono-tabular text-slate-600">
+                          {availableSchools.length} Sekolah Terdaftar
+                          {pendingAdminCount > 0 ? ` · ${pendingAdminCount} Menunggu Persetujuan` : ''}
+                        </span>
+                      </div>
+                      <h2 className="text-sm sm:text-base font-bold text-slate-900">
+                        Undang Guru / Operator Sekolah Dasar Lain Mendaftar sebagai Admin
+                      </h2>
+                      <p className="text-xs text-slate-600">
+                        Bagikan tautan pendaftaran khusus di bawah ini ke grup KKG atau Kepala Sekolah. Guru cukup login Google (<code className="font-mono text-slate-800">belajar.id</code> / Gmail) dan mengisi nama sekolahnya.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={handleCopyRegistrationLink}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg whitespace-nowrap shrink-0"
+                      >
+                        {copiedInviteLink ? (
+                          <>
+                            <Check className="w-3.5 h-3.5" />
+                            Link Tersalin
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5" />
+                            Salin Link Daftar Admin
+                          </>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setActiveMenu('access_settings')}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg whitespace-nowrap shrink-0"
+                      >
+                        Pengaturan &amp; Undangan WA
+                        <ArrowRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* 1-Click School Onboarding Quick-Start for New School Admins */}
+                {effectiveSchool !== 'ALL' &&
+                  effectiveSchool !== 'Penyelenggara TKA SD' &&
+                  schoolDedicatedExams.length < 2 && (
+                    <div className="bg-white border border-emerald-200 rounded-xl p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                      <div className="space-y-1">
+                        <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                          <Sparkles className="w-3.5 h-3.5" />
+                          Siap Pakai untuk {effectiveSchool}
+                        </div>
+                        <h2 className="text-sm sm:text-base font-bold text-slate-900">
+                          Aktifkan Paket Simulasi TKA Matematika &amp; Bahasa Indonesia untuk Sekolah Anda
+                        </h2>
+                        <p className="text-xs text-slate-600">
+                          Satu klik menyiapkan 2 jadwal ujian aktif (30 soal Matematika + 30 soal Bahasa Indonesia berverifikasi AI) khusus untuk siswa <strong>{effectiveSchool}</strong>.
+                        </p>
+                        {quickSetupMessage && (
+                          <p className="text-xs font-medium text-emerald-700 pt-1">
+                            {quickSetupMessage}
+                          </p>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                        <button
+                          type="button"
+                          disabled={quickSetupBusy}
+                          onClick={handleQuickCreateSchoolExams}
+                          className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 rounded-lg whitespace-nowrap shrink-0"
+                        >
+                          <Sparkles className="w-3.5 h-3.5" />
+                          {quickSetupBusy
+                            ? 'Menyiapkan Paket...'
+                            : 'Aktifkan 2 Paket Ujian Sekolah Saya'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setActiveMenu('students')}
+                          className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg whitespace-nowrap shrink-0"
+                        >
+                          Data Siswa &amp; Token
+                          <ArrowRight className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                {/* Active Classroom Token Control (scoped to school) */}
+                <TokenManagerCard
+                  tokens={cbtTokens}
+                  schoolName={effectiveSchool}
+                />
 
                 {/* 8 Required Live Database Metrics */}
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -765,7 +1229,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                   <div className="bg-white border border-slate-200 rounded-xl p-4">
                     <div className="text-xs font-medium text-slate-500">
-                      Total Bank Soal
+                      Total Bank Soal Bersama
                     </div>
                     <div className="text-2xl font-bold font-mono-tabular text-slate-900 mt-1">
                       {questions.length}
@@ -805,7 +1269,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </h2>
                     <p className="text-xs text-slate-600 mt-0.5">
                       Mendukung paket soal asli <strong>TO 1 MTK.pdf</strong> (Matematika) dan{' '}
-                      <strong>B.Indo 2.pdf</strong> (Bahasa Indonesia) lengkap dengan gambar asli PDF dan koreksi nilai otomatis.
+                      <strong>B.Indo 2.pdf</strong> (Bahasa Indonesia) lengkap dengan gambar asli PDF dan koreksi nilai otomatis untuk setiap sekolah.
                     </p>
                   </div>
 
@@ -813,23 +1277,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <div className="border border-slate-200 rounded-lg p-4 flex flex-col justify-between gap-3">
                       <div className="space-y-1">
                         <div className="text-xs font-bold text-blue-700">
-                          TAHAP 1 · IMPOR DOKUMEN
+                          TAHAP 1 · DATA SISWA &amp; TOKEN
                         </div>
                         <div className="text-sm font-semibold text-slate-900">
-                          Matematika &amp; Bahasa Indonesia
+                          Daftarkan Siswa Sekolah Anda
                         </div>
                         <p className="text-xs text-slate-600">
-                          {questions.length >= 60
-                            ? '60 soal asli (30 Matematika + 30 Bahasa Indonesia) dan aset visual asli telah masuk ke database.'
-                            : 'Muat ekstraksi resmi 30 soal TO 1 MTK.pdf dan 30 soal B.Indo 2.pdf beserta gambar asli.'}
+                          Tambahkan siswa Kelas VI satu per satu atau impor CSV, lalu bagikan Token Ujian (tanpa perlu email siswa).
                         </p>
                       </div>
                       <button
                         type="button"
-                        onClick={() => setActiveMenu('pdf_import')}
+                        onClick={() => setActiveMenu('students')}
                         className="inline-flex items-center justify-between px-3 py-2 text-xs font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg"
                       >
-                        <span>Buka Impor PDF</span>
+                        <span>Kelola Data Siswa</span>
                         <ArrowRight className="w-3.5 h-3.5" />
                       </button>
                     </div>
@@ -837,21 +1299,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <div className="border border-slate-200 rounded-lg p-4 flex flex-col justify-between gap-3">
                       <div className="space-y-1">
                         <div className="text-xs font-bold text-blue-700">
-                          TAHAP 2 · PEMERIKSAAN VISUAL
+                          TAHAP 2 · BANK SOAL &amp; PDF
                         </div>
                         <div className="text-sm font-semibold text-slate-900">
-                          Verifikasi Teks &amp; Gambar PDF
+                          60 Soal Resmi + Impor PDF Baru
                         </div>
                         <p className="text-xs text-slate-600">
-                          Bandingkan teks bacaan, bagan alir, infografis, dan potongan gambar asli berdampingan dengan halaman sumber PDF.
+                          {questions.length >= 60
+                            ? '60 soal resmi (Matematika & B. Indonesia) siap dipakai, atau unggah PDF soal tambahan milik sekolah Anda.'
+                            : 'Muat ekstraksi resmi 30 soal TO 1 MTK.pdf dan 30 soal B.Indo 2.pdf beserta gambar asli.'}
                         </p>
                       </div>
                       <button
                         type="button"
-                        onClick={() => setActiveMenu('verify_questions')}
+                        onClick={() => setActiveMenu('question_bank')}
                         className="inline-flex items-center justify-between px-3 py-2 text-xs font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg"
                       >
-                        <span>Verifikasi Soal &amp; Gambar</span>
+                        <span>Lihat Bank Soal</span>
                         <ArrowRight className="w-3.5 h-3.5" />
                       </button>
                     </div>
@@ -882,13 +1346,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <div className="border border-slate-200 rounded-lg p-4 flex flex-col justify-between gap-3">
                       <div className="space-y-1">
                         <div className="text-xs font-bold text-blue-700">
-                          TAHAP 4 · PUBLIKASI UJIAN
+                          TAHAP 4 · JADWAL &amp; REKAP NILAI
                         </div>
                         <div className="text-sm font-semibold text-slate-900">
-                          Jadwalkan &amp; Aktifkan Sesi
+                          Aktifkan Sesi &amp; Cetak Laporan
                         </div>
                         <p className="text-xs text-slate-600">
-                          Atur durasi hitung mundur, kelas sasaran, pengacakan, lalu buka sesi ujian bagi peserta Kelas VI.
+                          Atur durasi ujian sekolah Anda, pantau pengerjaan siswa secara langsung, dan unduh rekap nilai CSV / cetak PDF.
                         </p>
                       </div>
                       <button
@@ -914,7 +1378,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 questions={questions}
                 assets={assets}
                 answerKeys={answerKeys}
-                exams={exams}
+                exams={scopedExams}
+                isSuperAdmin={isSuperAdmin}
                 onSwitchTab={(tab) => setActiveMenu(tab)}
               />
             )}
@@ -925,8 +1390,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 questions={questions}
                 assets={assets}
                 answerKeys={answerKeys}
-                exams={exams}
+                exams={scopedExams}
+                allExams={exams}
                 tokens={cbtTokens}
+                adminSchoolName={
+                  effectiveSchool !== 'ALL' ? effectiveSchool : adminSchoolName
+                }
+                isSuperAdmin={isSuperAdmin}
               />
             )}
 
@@ -936,11 +1406,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <AdminStudentsAndAccess
                 activeSubTab={activeMenu}
                 users={users}
-                studentDirectory={studentDirectory}
+                studentDirectory={scopedStudents}
+                allStudentDirectory={studentDirectory}
                 tokens={cbtTokens}
                 admins={admins}
-                attempts={attempts}
-                auditLogs={auditLogs}
+                attempts={scopedAttempts}
+                auditLogs={scopedAuditLogs}
+                adminSchoolName={adminSchoolName}
+                isSuperAdmin={isSuperAdmin}
+                selectedSchoolFilter={selectedSchoolFilter}
+                registrationSettings={registrationSettings}
               />
             )}
 
@@ -950,13 +1425,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               activeMenu === 'export_reports') && (
               <AdminResultsAndReports
                 activeSubTab={activeMenu}
-                exams={exams}
+                exams={scopedExams}
                 questions={questions}
                 answerKeys={answerKeys}
-                attempts={attempts}
-                examGrades={examGrades}
+                attempts={scopedAttempts}
+                examGrades={scopedGrades}
                 users={users}
-                studentDirectory={studentDirectory}
+                studentDirectory={scopedStudents}
               />
             )}
           </div>

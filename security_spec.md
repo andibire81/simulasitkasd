@@ -1,14 +1,17 @@
 # Security Specification — SIMULASI TKA SD — CBT ONLINE (Admin Roster + Issued Token Access)
 
 ## 1. Data Invariants
-1. **Admin Authority (`isAdmin`)**: Only a signed-in user with `request.auth.token.email_verified == true` whose email matches the bootstrapped administrator (`andibire81@guru.sd.belajar.id`) or whose UID exists in `/admins/{uid}` has administrative privileges.
+1. **Admin Authority (`isAdmin`) & Multi-School Registration**:
+   - Only a signed-in user with `request.auth.token.email_verified == true` whose email matches the bootstrapped Super Admin (`andibire81@guru.sd.belajar.id`) or whose `/admins/{uid}` document exists with active status (`!('status' in data) || data.status == 'active'`) has administrative privileges.
+   - Verified Google teachers (`isVerifiedUser() && isOwner(adminId)`) can self-register their own `/admins/{uid}` document (`email == request.auth.token.email`, required `schoolName` & `position`) ONLY according to `/adminSettings/registration` controlled exclusively by `isBootstrappedAdmin()`: `'active'` when `mode == 'open'` (default), `'pending'` when `mode == 'approval'`, and denied when `mode == 'closed'`. Non-bootstrapped admins cannot change `status` or modify/delete other admins.
+   - School-scoped records (`studentDirectory`, `cbtTokens`, `exams`) restrict updates and deletes to `isBootstrappedAdmin()`, the document creator (`createdBy == request.auth.uid`), or active admins belonging to the same `schoolName`. Official shared TKA question packs (`to1_mtk`, `bindo_2`) cannot be deleted or overwritten once verified except by `isBootstrappedAdmin()`.
 2. **Zero Blanket Collection Listing**: EVERY collection in Firestore restricts `allow list` strictly to `isAdmin()`. Unauthenticated/student clients cannot enumerate `/studentDirectory`, `/cbtTokens`, `/studentSessions`, `/questions`, `/answerKeys`, `/exams`, `/attempts`, `/responses`, `/examGrades`, or `/auditLogs`.
 3. **Prior Admin Registration & Explicit Token Issuance Gate (`isTokenValidForStudent`)**:
-   - Students CANNOT self-register in `/studentDirectory` (`allow create, update, delete: if isAdmin()`).
+   - Students CANNOT self-register in `/studentDirectory` (`allow create, update, delete` requires `isAdmin()`).
    - Plaintext tokens NEVER reside on `/studentDirectory/{studentId}` so knowing a student's name never reveals their token.
    - A `/studentSessions/{sessionId}` document can ONLY be created (and remains valid for reads, attempts, and responses) if:
-     a. `/studentDirectory/{studentId}` exists, `accountStatus == 'active'`, and `tokenStatus == 'issued'` (Admin has registered the student AND granted token access),
-     b. `/cbtTokens/{tokenCode}` exists, `active == true`, and either `scope == 'classroom'` or `(scope == 'student' && studentId == incoming().studentId)`, and
+     a. `/studentDirectory/{studentId}` exists, `accountStatus == 'active'`, and `tokenStatus == 'issued'`,
+     b. `/cbtTokens/{tokenCode}` exists, `active == true`, scope matches, and when `tokenDoc.schoolName` is set, `studentDoc.schoolName == tokenDoc.schoolName`, and
      c. `fullName`, `participantNumber`, `className`, and `schoolName` match the authoritative `/studentDirectory/{studentId}` record.
 4. **Confidentiality of Answer Keys & Unpublished Grades**: `/answerKeys/{questionId}` and `/examGrades/{attemptId}` are 100% `isAdmin()` only for all reads and writes.
 5. **Capability-Addressed Student Responses & Immediate Revocation**: Each student response document ID must equal `sessionId + '_' + questionId` and match the parent `/attempts/{attemptId}`'s active `sessionId`, `status == 'in_progress'`, `request.time <= expiresAt`, and `isValidActiveSessionForStudent(...)` (which re-verifies `isTokenValidForStudent` on every write so revoking a token or student immediately halts access).

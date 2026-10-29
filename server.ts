@@ -94,7 +94,13 @@ async function verifyAdminRequest(req: Request): Promise<VerifiedAuthUser | null
       headers: { Authorization: authHeader },
     });
     if (docResp.ok) {
-      return user;
+      const docJson = (await docResp.json()) as {
+        fields?: { status?: { stringValue?: string } };
+      };
+      const statusVal = docJson.fields?.status?.stringValue;
+      if (!statusVal || statusVal === 'active') {
+        return user;
+      }
     }
   } catch {
     return null;

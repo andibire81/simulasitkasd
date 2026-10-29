@@ -37,6 +37,7 @@ import {
   ComplexScoringRule,
   ExamRecord,
   ExamStatus,
+  normalizeSchoolName,
   QuestionRecord,
   QuestionType,
   sanitizeId,
@@ -66,7 +67,10 @@ interface AdminAnswerKeysAndExamsProps {
   assets: AssetRecord[];
   answerKeys: AnswerKeyRecord[];
   exams: ExamRecord[];
+  allExams?: ExamRecord[];
   tokens: CbtTokenRecord[];
+  adminSchoolName?: string;
+  isSuperAdmin?: boolean;
 }
 
 function toDatetimeLocalValue(ts?: Timestamp): string {
@@ -107,8 +111,12 @@ export const AdminAnswerKeysAndExams: React.FC<AdminAnswerKeysAndExamsProps> = (
   assets,
   answerKeys,
   exams,
+  allExams,
   tokens,
+  adminSchoolName = 'Penyelenggara TKA SD',
+  isSuperAdmin = false,
 }) => {
+  const portalExamsPool = allExams || exams;
   const sortedQuestions = [...questions].sort((a, b) => {
     if (a.subject !== b.subject) return a.subject.localeCompare(b.subject);
     return a.originalNumber - b.originalNumber;
@@ -144,6 +152,9 @@ export const AdminAnswerKeysAndExams: React.FC<AdminAnswerKeysAndExamsProps> = (
   );
   const [subject, setSubject] = useState('Matematika');
   const [targetClass, setTargetClass] = useState('Semua');
+  const [examSchoolName, setExamSchoolName] = useState<string>(() =>
+    isSuperAdmin ? 'Semua' : adminSchoolName
+  );
   const [durationMinutes, setDurationMinutes] = useState(90);
   const [startLocal, setStartLocal] = useState(() => {
     const now = new Date();
@@ -154,7 +165,7 @@ export const AdminAnswerKeysAndExams: React.FC<AdminAnswerKeysAndExamsProps> = (
     const end = new Date(Date.now() + 7 * 24 * 3600 * 1000);
     return toDatetimeLocalValue(Timestamp.fromDate(end));
   });
-  const [examStatus, setExamStatus] = useState<ExamStatus>(ExamStatus.DRAFT);
+  const [examStatus, setExamStatus] = useState<ExamStatus>(ExamStatus.ACTIVE);
   const [allowRetake, setAllowRetake] = useState(false);
   const [shuffleQuestions, setShuffleQuestions] = useState(false);
   const [shuffleOptions, setShuffleOptions] = useState(false);
@@ -165,6 +176,12 @@ export const AdminAnswerKeysAndExams: React.FC<AdminAnswerKeysAndExamsProps> = (
   const [examError, setExamError] = useState<string | null>(null);
   const [examSuccess, setExamSuccess] = useState<string | null>(null);
   const [confirmDeleteExamId, setConfirmDeleteExamId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!editingExamId && !isSuperAdmin) {
+      setExamSchoolName(adminSchoolName);
+    }
+  }, [adminSchoolName, editingExamId, isSuperAdmin]);
 
   const otherQuestions = sortedQuestions.filter(
     (q) => q.examPackId !== TO1_PACK_ID && q.examPackId !== BINDO2_PACK_ID
@@ -608,23 +625,29 @@ export const AdminAnswerKeysAndExams: React.FC<AdminAnswerKeysAndExamsProps> = (
                 </span>
               </button>
 
-              <button
-                type="button"
-                disabled={syncingAllKeys}
-                onClick={handleSyncActivePackAiKeys}
-                className="min-h-[40px] px-4 py-2 rounded-lg bg-blue-700 hover:bg-blue-800 disabled:opacity-60 text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
-              >
-                {syncingAllKeys ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <RefreshCw className="w-4 h-4" />
-                )}
-                <span>
-                  {syncingAllKeys
-                    ? 'Menyimpan 30 Kunci...'
-                    : `Simpan Otomatis 30 Kunci ${activeSubjectLabel}`}
+              {isSuperAdmin || verifiedKeysCount < (keyPackQuestions.length || 30) ? (
+                <button
+                  type="button"
+                  disabled={syncingAllKeys}
+                  onClick={handleSyncActivePackAiKeys}
+                  className="min-h-[40px] px-4 py-2 rounded-lg bg-blue-700 hover:bg-blue-800 disabled:opacity-60 text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                >
+                  {syncingAllKeys ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="w-4 h-4" />
+                  )}
+                  <span>
+                    {syncingAllKeys
+                      ? 'Menyimpan 30 Kunci...'
+                      : `Simpan Otomatis 30 Kunci ${activeSubjectLabel}`}
+                  </span>
+                </button>
+              ) : (
+                <span className="min-h-[40px] px-3.5 py-2 rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 text-xs font-semibold inline-flex items-center whitespace-nowrap shrink-0">
+                  ✓ 30 Kunci Resmi Aktif
                 </span>
-              </button>
+              )}
             </div>
           )}
         </div>
@@ -834,28 +857,37 @@ export const AdminAnswerKeysAndExams: React.FC<AdminAnswerKeysAndExamsProps> = (
                   </div>
 
                   {/* Single-Question Multimodal Gemini Solver & Auto-Saver */}
-                  <div className="p-3.5 rounded-lg border border-blue-200 bg-blue-50/60 space-y-2.5">
-                    <div className="text-xs text-slate-700 leading-relaxed">
-                      Gunakan analisis AI multimodal untuk memeriksa teks &amp; gambar soal ini lalu menyimpan kunci jawaban beserta pembahasannya secara otomatis.
+                  {!isSuperAdmin &&
+                  (currentQ.examPackId === TO1_PACK_ID ||
+                    currentQ.examPackId === BINDO2_PACK_ID) &&
+                  currentKey?.verified ? (
+                    <div className="p-3.5 rounded-lg border border-emerald-200 bg-emerald-50 text-xs text-emerald-900 leading-relaxed">
+                      <strong>✓ Kunci Jawaban Paket Utama Bersama:</strong> Kunci jawaban dan pembahasan soal ini telah terverifikasi secara terpusat dan siap mengoreksi otomatis jawaban siswa sekolah Anda.
                     </div>
-                    <button
-                      type="button"
-                      disabled={aiSolvingSingle || savingKey}
-                      onClick={handleSolveCurrentQuestionWithAi}
-                      className="w-full min-h-[38px] px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
-                    >
-                      {aiSolvingSingle ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <Sparkles className="w-3.5 h-3.5" />
-                      )}
-                      <span>
-                        {aiSolvingSingle
-                          ? 'Menganalisis Teks & Gambar Soal...'
-                          : 'Analisis & Simpan Otomatis dengan AI'}
-                      </span>
-                    </button>
-                  </div>
+                  ) : (
+                    <div className="p-3.5 rounded-lg border border-blue-200 bg-blue-50/60 space-y-2.5">
+                      <div className="text-xs text-slate-700 leading-relaxed">
+                        Gunakan analisis AI multimodal untuk memeriksa teks &amp; gambar soal ini lalu menyimpan kunci jawaban beserta pembahasannya secara otomatis.
+                      </div>
+                      <button
+                        type="button"
+                        disabled={aiSolvingSingle || savingKey}
+                        onClick={handleSolveCurrentQuestionWithAi}
+                        className="w-full min-h-[38px] px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
+                      >
+                        {aiSolvingSingle ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Sparkles className="w-3.5 h-3.5" />
+                        )}
+                        <span>
+                          {aiSolvingSingle
+                            ? 'Menganalisis Teks & Gambar Soal...'
+                            : 'Analisis & Simpan Otomatis dengan AI'}
+                        </span>
+                      </button>
+                    </div>
+                  )}
 
                   {currentKey?.locked && !unlockConfirm && (
                     <div className="p-3.5 rounded-lg border border-amber-300 bg-amber-50 text-xs text-amber-900 space-y-2">
@@ -1080,27 +1112,34 @@ export const AdminAnswerKeysAndExams: React.FC<AdminAnswerKeysAndExamsProps> = (
                     </div>
                   )}
 
-                  <div className="flex flex-wrap items-center gap-2.5 pt-2 border-t border-slate-200">
-                    <button
-                      type="button"
-                      disabled={savingKey || aiSolvingSingle}
-                      onClick={() => handleSaveAndVerifyKey(true)}
-                      className="flex-1 min-h-[42px] px-4 py-2 rounded-lg bg-emerald-700 text-white text-sm font-semibold hover:bg-emerald-800 disabled:opacity-60 inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
-                    >
-                      <CheckCircle2 className="w-4 h-4" />
-                      <span>{savingKey ? 'Menyimpan...' : 'Simpan & Verifikasi Kunci'}</span>
-                    </button>
-                    {currentKey?.verified && (
+                  {isSuperAdmin ||
+                  !(
+                    (currentQ.examPackId === TO1_PACK_ID ||
+                      currentQ.examPackId === BINDO2_PACK_ID) &&
+                    currentKey?.verified
+                  ) ? (
+                    <div className="flex flex-wrap items-center gap-2.5 pt-2 border-t border-slate-200">
                       <button
                         type="button"
                         disabled={savingKey || aiSolvingSingle}
-                        onClick={() => handleSaveAndVerifyKey(false)}
-                        className="px-3.5 py-2 rounded-lg border border-slate-300 text-xs font-semibold text-slate-700 hover:bg-slate-100 whitespace-nowrap"
+                        onClick={() => handleSaveAndVerifyKey(true)}
+                        className="flex-1 min-h-[42px] px-4 py-2 rounded-lg bg-emerald-700 text-white text-sm font-semibold hover:bg-emerald-800 disabled:opacity-60 inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
                       >
-                        Tandai Belum Siap
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>{savingKey ? 'Menyimpan...' : 'Simpan & Verifikasi Kunci'}</span>
                       </button>
-                    )}
-                  </div>
+                      {currentKey?.verified && (
+                        <button
+                          type="button"
+                          disabled={savingKey || aiSolvingSingle}
+                          onClick={() => handleSaveAndVerifyKey(false)}
+                          className="px-3.5 py-2 rounded-lg border border-slate-300 text-xs font-semibold text-slate-700 hover:bg-slate-100 whitespace-nowrap"
+                        >
+                          Tandai Belum Siap
+                        </button>
+                      )}
+                    </div>
+                  ) : null}
                 </div>
               </div>
             )}
@@ -1160,6 +1199,15 @@ export const AdminAnswerKeysAndExams: React.FC<AdminAnswerKeysAndExamsProps> = (
     setExamSuccess(null);
   };
 
+  const canManageExamRecord = (ex: ExamRecord) =>
+    isSuperAdmin ||
+    ex.createdBy === auth.currentUser?.uid ||
+    Boolean(
+      ex.schoolName &&
+        ex.schoolName !== 'Semua' &&
+        normalizeSchoolName(ex.schoolName) === normalizeSchoolName(adminSchoolName)
+    );
+
   const handleLoadExamToForm = (ex: ExamRecord) => {
     setEditingExamId(ex.id);
     setExamPackIdState(ex.examPackId || TO1_PACK_ID);
@@ -1167,6 +1215,7 @@ export const AdminAnswerKeysAndExams: React.FC<AdminAnswerKeysAndExamsProps> = (
     setDescription(ex.description);
     setSubject(ex.subject);
     setTargetClass(ex.targetClass);
+    setExamSchoolName(ex.schoolName || (isSuperAdmin ? 'Semua' : adminSchoolName));
     setDurationMinutes(ex.durationMinutes);
     setStartLocal(toDatetimeLocalValue(ex.scheduledStart));
     setEndLocal(toDatetimeLocalValue(ex.scheduledEnd));
@@ -1181,6 +1230,28 @@ export const AdminAnswerKeysAndExams: React.FC<AdminAnswerKeysAndExamsProps> = (
     setExamSuccess(null);
   };
 
+  const handleDuplicateExamForMySchool = (ex: ExamRecord) => {
+    setEditingExamId(null);
+    setExamPackIdState(ex.examPackId || TO1_PACK_ID);
+    setTitle(`${ex.title} — ${adminSchoolName}`);
+    setDescription(ex.description);
+    setSubject(ex.subject);
+    setTargetClass('Semua');
+    setExamSchoolName(adminSchoolName);
+    setDurationMinutes(ex.durationMinutes);
+    setExamStatus(ExamStatus.ACTIVE);
+    setAllowRetake(ex.allowRetake);
+    setShuffleQuestions(ex.shuffleQuestions);
+    setShuffleOptions(ex.shuffleOptions);
+    setShowDiscussion(ex.showDiscussion);
+    setPublishScore(ex.publishScore);
+    setSelectedExamQuestionIds(ex.questionIds);
+    setExamError(null);
+    setExamSuccess(
+      `Templat "${ex.title}" dimuat untuk ${adminSchoolName}. Klik "Simpan & Buat Ujian" di bawah untuk mengaktifkannya.`
+    );
+  };
+
   const handleResetExamForm = () => {
     setEditingExamId(null);
     setExamPackIdState(TO1_PACK_ID);
@@ -1190,8 +1261,9 @@ export const AdminAnswerKeysAndExams: React.FC<AdminAnswerKeysAndExamsProps> = (
     );
     setSubject('Matematika');
     setTargetClass('Semua');
+    setExamSchoolName(isSuperAdmin ? 'Semua' : adminSchoolName);
     setDurationMinutes(90);
-    setExamStatus(ExamStatus.DRAFT);
+    setExamStatus(ExamStatus.ACTIVE);
     setAllowRetake(false);
     setShuffleQuestions(false);
     setShuffleOptions(false);
@@ -1254,8 +1326,14 @@ export const AdminAnswerKeysAndExams: React.FC<AdminAnswerKeysAndExamsProps> = (
         ? TO1_SOURCE_PDF_NAME
         : clampStr(firstSelectedQ?.sourcePdfName || TO1_SOURCE_PDF_NAME, 200);
 
+    const resolvedSchoolTarget = clampStr(
+      isSuperAdmin ? examSchoolName || 'Semua' : adminSchoolName,
+      120
+    );
+
     setSavingExam(true);
     const examId = editingExamId || sanitizeId(`exam_${Date.now().toString(36)}`);
+    const adminUid = auth.currentUser?.uid || '';
     try {
       const payload = {
         id: examId,
@@ -1276,6 +1354,7 @@ export const AdminAnswerKeysAndExams: React.FC<AdminAnswerKeysAndExamsProps> = (
         showDiscussion,
         publishScore,
         sourcePdfName: resolvedSourcePdfName,
+        schoolName: resolvedSchoolTarget,
         updatedAt: serverTimestamp(),
       };
 
@@ -1284,24 +1363,26 @@ export const AdminAnswerKeysAndExams: React.FC<AdminAnswerKeysAndExamsProps> = (
       } else {
         await setDoc(doc(db, 'exams', examId), {
           ...payload,
+          ...(adminUid ? { createdBy: adminUid } : {}),
           createdAt: serverTimestamp(),
         });
       }
 
       const updatedExamObj: ExamRecord = {
         ...payload,
+        ...(adminUid && !editingExamId ? { createdBy: adminUid } : {}),
         updatedAt: Timestamp.now(),
       };
       const nextExamsList = editingExamId
-        ? exams.map((x) => (x.id === examId ? updatedExamObj : x))
-        : [...exams, updatedExamObj];
+        ? portalExamsPool.map((x) => (x.id === examId ? updatedExamObj : x))
+        : [...portalExamsPool, updatedExamObj];
       await syncPublishedExamsPortalIndex(nextExamsList);
 
       await recordAuditLog({
         action: editingExamId ? 'UPDATE_EXAM' : 'CREATE_EXAM',
         targetType: 'exam',
         targetId: examId,
-        summary: `${editingExamId ? 'Memperbarui' : 'Membuat'} ujian "${payload.title}" (${payload.subject}) dengan status ${examStatus.toUpperCase()} (${validSelectedIds.length} soal).`,
+        summary: `${editingExamId ? 'Memperbarui' : 'Membuat'} ujian "${payload.title}" (${payload.subject} · ${resolvedSchoolTarget}) dengan status ${examStatus.toUpperCase()} (${validSelectedIds.length} soal).`,
       });
 
       setEditingExamId(examId);
@@ -1326,7 +1407,7 @@ export const AdminAnswerKeysAndExams: React.FC<AdminAnswerKeysAndExamsProps> = (
         status: nextStatus,
         updatedAt: serverTimestamp(),
       });
-      const nextExamsList = exams.map((x) =>
+      const nextExamsList = portalExamsPool.map((x) =>
         x.id === ex.id ? { ...x, status: nextStatus } : x
       );
       await syncPublishedExamsPortalIndex(nextExamsList);
@@ -1344,7 +1425,7 @@ export const AdminAnswerKeysAndExams: React.FC<AdminAnswerKeysAndExamsProps> = (
   const handleDeleteExam = async (examId: string) => {
     try {
       await deleteDoc(doc(db, 'exams', examId));
-      const nextExamsList = exams.filter((x) => x.id !== examId);
+      const nextExamsList = portalExamsPool.filter((x) => x.id !== examId);
       await syncPublishedExamsPortalIndex(nextExamsList);
       await recordAuditLog({
         action: 'DELETE_EXAM',
@@ -1365,7 +1446,7 @@ export const AdminAnswerKeysAndExams: React.FC<AdminAnswerKeysAndExamsProps> = (
         <div>
           <h2 className="text-xl font-bold text-slate-900">Manajemen &amp; Pengaturan Ujian</h2>
           <p className="text-sm text-slate-600 mt-0.5">
-            Atur jadwal, durasi, sasaran kelas, token masuk siswa, pengacakan aman, dan publikasi nilai ujian CBT.
+            Atur jadwal, durasi, sasaran sekolah/kelas, token masuk siswa, pengacakan aman, dan publikasi nilai ujian CBT.
           </p>
         </div>
         {editingExamId && (
@@ -1381,7 +1462,11 @@ export const AdminAnswerKeysAndExams: React.FC<AdminAnswerKeysAndExamsProps> = (
       </div>
 
       {/* Quick Token Access Bar */}
-      <TokenManagerCard tokens={tokens} compact />
+      <TokenManagerCard
+        tokens={tokens}
+        schoolName={isSuperAdmin ? 'ALL' : adminSchoolName}
+        compact
+      />
 
       {unverifiedCount > 0 && (
         <div className="p-4 rounded-xl border border-amber-300 bg-amber-50 text-sm text-amber-950 flex items-start gap-3">
@@ -1414,7 +1499,7 @@ export const AdminAnswerKeysAndExams: React.FC<AdminAnswerKeysAndExamsProps> = (
               <tr className="border-b border-slate-200 bg-slate-50 text-slate-700">
                 <th className="py-3 px-4 font-semibold">Nama Ujian</th>
                 <th className="py-3 px-4 font-semibold">Mata Pelajaran</th>
-                <th className="py-3 px-4 font-semibold">Kelas</th>
+                <th className="py-3 px-4 font-semibold">Sekolah · Kelas</th>
                 <th className="py-3 px-4 font-semibold text-right">Soal / Durasi</th>
                 <th className="py-3 px-4 font-semibold">Status Ujian</th>
                 <th className="py-3 px-4 font-semibold">Publikasi Nilai</th>
@@ -1422,74 +1507,106 @@ export const AdminAnswerKeysAndExams: React.FC<AdminAnswerKeysAndExamsProps> = (
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200">
-              {exams.map((ex) => (
-                <tr key={ex.id} className="hover:bg-slate-50/70">
-                  <td className="py-3.5 px-4 font-semibold text-slate-900">{ex.title}</td>
-                  <td className="py-3.5 px-4 text-xs text-slate-700 whitespace-nowrap">
-                    <div className="font-semibold text-slate-900">{ex.subject}</div>
-                    <div className="text-[11px] text-slate-500">{ex.sourcePdfName}</div>
-                  </td>
-                  <td className="py-3.5 px-4 text-slate-600">{ex.targetClass}</td>
-                  <td className="py-3.5 px-4 text-right font-mono-tabular text-slate-700">
-                    {ex.questionCount} soal · {ex.durationMinutes} mnt
-                  </td>
-                  <td className="py-3.5 px-4">
-                    <select
-                      value={ex.status}
-                      onChange={(e) => handleQuickExamStatus(ex, e.target.value as ExamStatus)}
-                      className="px-2.5 py-1 rounded border border-slate-300 text-xs font-semibold bg-white"
-                    >
-                      <option value={ExamStatus.DRAFT}>Draf</option>
-                      <option value={ExamStatus.WAITING}>Menunggu</option>
-                      <option value={ExamStatus.ACTIVE}>Aktif (Dibuka)</option>
-                      <option value={ExamStatus.FINISHED}>Selesai (Ditutup)</option>
-                      <option value={ExamStatus.ARCHIVED}>Diarsipkan</option>
-                    </select>
-                  </td>
-                  <td className="py-3.5 px-4 text-xs font-semibold">
-                    {ex.publishScore ? (
-                      <span className="text-emerald-700">Diizinkan</span>
-                    ) : (
-                      <span className="text-slate-500">Disembunyikan</span>
-                    )}
-                  </td>
-                  <td className="py-3.5 px-4 text-right whitespace-nowrap space-x-2">
-                    <button
-                      type="button"
-                      onClick={() => handleLoadExamToForm(ex)}
-                      className="px-3 py-1.5 rounded border border-slate-300 text-xs font-semibold text-sky-800 hover:bg-sky-50"
-                    >
-                      Pengaturan
-                    </button>
-                    {confirmDeleteExamId === ex.id ? (
-                      <>
+              {exams.map((ex) => {
+                const editable = canManageExamRecord(ex);
+                return (
+                  <tr key={ex.id} className="hover:bg-slate-50/70">
+                    <td className="py-3.5 px-4 font-semibold text-slate-900">{ex.title}</td>
+                    <td className="py-3.5 px-4 text-xs text-slate-700 whitespace-nowrap">
+                      <div className="font-semibold text-slate-900">{ex.subject}</div>
+                      <div className="text-[11px] text-slate-500">{ex.sourcePdfName}</div>
+                    </td>
+                    <td className="py-3.5 px-4 text-xs text-slate-700">
+                      <div className="font-semibold text-slate-900">
+                        {!ex.schoolName || ex.schoolName === 'Semua'
+                          ? 'Semua Sekolah'
+                          : ex.schoolName}
+                      </div>
+                      <div className="text-[11px] text-slate-500">Kelas {ex.targetClass}</div>
+                    </td>
+                    <td className="py-3.5 px-4 text-right font-mono-tabular text-slate-700">
+                      {ex.questionCount} soal · {ex.durationMinutes} mnt
+                    </td>
+                    <td className="py-3.5 px-4">
+                      {editable ? (
+                        <select
+                          value={ex.status}
+                          onChange={(e) =>
+                            handleQuickExamStatus(ex, e.target.value as ExamStatus)
+                          }
+                          className="px-2.5 py-1 rounded border border-slate-300 text-xs font-semibold bg-white"
+                        >
+                          <option value={ExamStatus.DRAFT}>Draf</option>
+                          <option value={ExamStatus.WAITING}>Menunggu</option>
+                          <option value={ExamStatus.ACTIVE}>Aktif (Dibuka)</option>
+                          <option value={ExamStatus.FINISHED}>Selesai (Ditutup)</option>
+                          <option value={ExamStatus.ARCHIVED}>Diarsipkan</option>
+                        </select>
+                      ) : (
+                        <span className="text-xs font-semibold text-slate-700 uppercase">
+                          {ex.status === ExamStatus.ACTIVE
+                            ? 'Aktif (Bersama)'
+                            : ex.status}
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-3.5 px-4 text-xs font-semibold">
+                      {ex.publishScore ? (
+                        <span className="text-emerald-700">Diizinkan</span>
+                      ) : (
+                        <span className="text-slate-500">Disembunyikan</span>
+                      )}
+                    </td>
+                    <td className="py-3.5 px-4 text-right whitespace-nowrap space-x-2">
+                      {editable ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => handleLoadExamToForm(ex)}
+                            className="px-3 py-1.5 rounded border border-slate-300 text-xs font-semibold text-sky-800 hover:bg-sky-50"
+                          >
+                            Pengaturan
+                          </button>
+                          {confirmDeleteExamId === ex.id ? (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteExam(ex.id)}
+                                className="px-2.5 py-1.5 rounded bg-red-700 text-white text-xs font-semibold"
+                              >
+                                Konfirmasi Hapus
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteExamId(null)}
+                                className="px-2 py-1.5 rounded border border-slate-300 text-xs"
+                              >
+                                Batal
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteExamId(ex.id)}
+                              className="px-2.5 py-1.5 rounded border border-red-200 text-xs font-semibold text-red-700 hover:bg-red-50"
+                            >
+                              Hapus
+                            </button>
+                          )}
+                        </>
+                      ) : (
                         <button
                           type="button"
-                          onClick={() => handleDeleteExam(ex.id)}
-                          className="px-2.5 py-1.5 rounded bg-red-700 text-white text-xs font-semibold"
+                          onClick={() => handleDuplicateExamForMySchool(ex)}
+                          className="px-3 py-1.5 rounded border border-blue-200 bg-blue-50 text-xs font-semibold text-blue-800 hover:bg-blue-100"
                         >
-                          Konfirmasi Hapus
+                          Duplikasi utk Sekolah Saya
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => setConfirmDeleteExamId(null)}
-                          className="px-2 py-1.5 rounded border border-slate-300 text-xs"
-                        >
-                          Batal
-                        </button>
-                      </>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => setConfirmDeleteExamId(ex.id)}
-                        className="px-2.5 py-1.5 rounded border border-red-200 text-xs font-semibold text-red-700 hover:bg-red-50"
-                      >
-                        Hapus
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
@@ -1591,6 +1708,34 @@ export const AdminAnswerKeysAndExams: React.FC<AdminAnswerKeysAndExamsProps> = (
             <datalist id="exam-subject-options">
               <option value="Matematika" />
               <option value="Bahasa Indonesia" />
+            </datalist>
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold text-slate-700 mb-1">
+              Sasaran Sekolah Penyelenggara
+            </label>
+            {isSuperAdmin ? (
+              <input
+                type="text"
+                required
+                list="exam-school-options"
+                value={examSchoolName}
+                onChange={(e) => setExamSchoolName(e.target.value)}
+                placeholder="Semua (atau ketik nama SD tertentu)"
+                className="w-full px-3.5 py-2 rounded-lg border border-slate-300 text-sm bg-white"
+              />
+            ) : (
+              <input
+                type="text"
+                readOnly
+                value={adminSchoolName}
+                className="w-full px-3.5 py-2 rounded-lg border border-slate-200 bg-slate-50 text-sm font-semibold text-slate-800"
+              />
+            )}
+            <datalist id="exam-school-options">
+              <option value="Semua" />
+              <option value={adminSchoolName} />
             </datalist>
           </div>
 
