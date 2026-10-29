@@ -15,44 +15,12 @@ export async function syncServerClock(): Promise<void> {
       const t0 = performance.now();
       const resp = await fetch('/api/time', { cache: 'no-store' });
       const t1 = performance.now();
-      const contentType = resp.headers.get('content-type') || '';
-
-      if (resp.ok && contentType.includes('application/json')) {
+      if (resp.ok) {
         const data = (await resp.json()) as { serverTimeMs?: number };
         if (typeof data.serverTimeMs === 'number') {
           const rttHalf = (t1 - t0) / 2;
           syncedServerEpochMs = data.serverTimeMs + rttHalf;
           syncedPerfNowMs = t1;
-          return;
-        }
-      }
-
-      // Fallback for static hosting (e.g., Vercel CDN): anchor to authoritative HTTP Date header
-      const dateHeader = resp.headers.get('date');
-      if (dateHeader) {
-        const parsedMs = Date.parse(dateHeader);
-        if (!Number.isNaN(parsedMs)) {
-          const rttHalf = (t1 - t0) / 2;
-          syncedServerEpochMs = parsedMs + rttHalf;
-          syncedPerfNowMs = t1;
-          return;
-        }
-      }
-
-      // Secondary HEAD request to root if /api/time did not include Date header
-      const h0 = performance.now();
-      const headResp = await fetch('/?clock_sync=1', {
-        method: 'HEAD',
-        cache: 'no-store',
-      });
-      const h1 = performance.now();
-      const rootDate = headResp.headers.get('date');
-      if (rootDate) {
-        const parsedRootMs = Date.parse(rootDate);
-        if (!Number.isNaN(parsedRootMs)) {
-          const rttHalf = (h1 - h0) / 2;
-          syncedServerEpochMs = parsedRootMs + rttHalf;
-          syncedPerfNowMs = h1;
         }
       }
     } catch {

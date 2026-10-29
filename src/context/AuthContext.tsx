@@ -3,8 +3,6 @@ import {
   User as FirebaseUser,
   onAuthStateChanged,
   signInWithPopup,
-  signInWithRedirect,
-  getRedirectResult,
   signInWithEmailAndPassword,
   signOut as firebaseSignOut,
 } from 'firebase/auth';
@@ -70,14 +68,12 @@ interface AuthContextValue {
   registrationSettings: AdminRegistrationSettingsRecord;
   authReady: boolean;
   authError: string | null;
-  authErrorCode: string | null;
   clearAuthError: () => void;
   signInStudentWithNameAndToken: (
     studentName: string,
     tokenInput: string
   ) => Promise<boolean>;
-  signInWithGoogle: () => Promise<'admin' | 'onboarding' | 'redirecting' | 'error'>;
-  signInWithGoogleRedirect: () => Promise<void>;
+  signInWithGoogle: () => Promise<'admin' | 'onboarding' | 'error'>;
   completeSchoolAdminRegistration: (params: {
     fullName: string;
     schoolName: string;
@@ -93,132 +89,31 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
-export function canUseAuthRedirect(): boolean {
-  if (typeof window === 'undefined') return false;
-  try {
-    return window.self === window.top;
-  } catch {
-    return false;
-  }
-}
-
-function getCurrentHostname(): string {
-  if (typeof window === 'undefined') return 'domain aplikasi ini';
-  return window.location.hostname || 'domain aplikasi ini';
-}
-
-function parseAuthError(error: unknown): { code: string | null; message: string } {
-  const rawCode =
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    typeof (error as { code?: unknown }).code === 'string'
-      ? (error as { code: string }).code
-      : null;
+function translateAuthError(error: unknown): string {
   const msg = error instanceof Error ? error.message : String(error);
-  const combined = `${rawCode || ''} ${msg}`;
-  const host = getCurrentHostname();
-
+  if (msg.includes('auth/popup-closed-by-user')) {
+    return 'Jendela masuk Google ditutup sebelum proses selesai. Silakan coba lagi.';
+  }
+  if (msg.includes('auth/popup-blocked')) {
+    return 'Jendela pop-up diblokir oleh peramban. Izinkan pop-up untuk situs ini lalu coba lagi.';
+  }
   if (
-    combined.includes('auth/unauthorized-domain') ||
-    combined.includes('auth/unauthorized-continue-uri') ||
-    combined.includes('auth/invalid-continue-uri')
+    msg.includes('auth/invalid-credential') ||
+    msg.includes('auth/wrong-password') ||
+    msg.includes('auth/user-not-found')
   ) {
-    return {
-      code: 'auth/unauthorized-domain',
-      message: `Domain "${host}" belum didaftarkan pada Authorized Domains di Firebase Authentication. Ikuti langkah singkat di bawah untuk mengizinkan domain Vercel ini.`,
-    };
+    return 'Email atau kata sandi administrator tidak sesuai. Periksa kembali identitas Anda.';
   }
-
-  if (
-    combined.includes('API_KEY_HTTP_REFERRER_BLOCKED') ||
-    combined.includes('requests-to-this-api-identitytoolkit') ||
-    combined.includes('auth/api-key-not-valid') ||
-    combined.includes('auth/invalid-api-key')
-  ) {
-    return {
-      code: 'auth/api-key-restricted',
-      message: `Kunci API Firebase menolak permintaan dari domain "${host}". Pastikan pembatasan HTTP Referrer di Google Cloud Console mengizinkan "https://${host}/*".`,
-    };
+  if (msg.includes('auth/operation-not-allowed')) {
+    return 'Metode masuk Email/Kata Sandi belum diaktifkan di Firebase Console. Gunakan tombol Masuk/Daftar dengan Google.';
   }
-
-  if (combined.includes('auth/popup-closed-by-user')) {
-    return {
-      code: 'auth/popup-closed-by-user',
-      message: 'Jendela masuk Google ditutup sebelum proses selesai. Silakan coba lagi.',
-    };
+  if (msg.includes('auth/network-request-failed')) {
+    return 'Koneksi internet terputus. Periksa jaringan Anda lalu coba kembali.';
   }
-
-  if (combined.includes('auth/cancelled-popup-request')) {
-    return {
-      code: 'auth/cancelled-popup-request',
-      message:
-        'Permintaan pop-up sebelumnya dibatalkan. Klik tombol masuk/daftar Google satu kali lalu tunggu jendela terbuka.',
-    };
+  if (msg.includes('auth/too-many-requests')) {
+    return 'Terlalu banyak percobaan masuk yang gagal. Tunggu beberapa saat sebelum mencoba lagi.';
   }
-
-  if (
-    combined.includes('auth/popup-blocked') ||
-    combined.includes('auth/operation-not-supported-in-this-environment')
-  ) {
-    return {
-      code: 'auth/popup-blocked',
-      message: canUseAuthRedirect()
-        ? 'Jendela pop-up diblokir oleh peramban. Silakan izinkan pop-up atau gunakan tombol Mode Alih Halaman (Tanpa Pop-up) di bawah.'
-        : 'Jendela pop-up diblokir oleh peramban. Izinkan pop-up untuk situs ini lalu coba lagi.',
-    };
-  }
-
-  if (combined.includes('auth/web-storage-unsupported')) {
-    return {
-      code: 'auth/web-storage-unsupported',
-      message:
-        'Penyimpanan sesi/cookie dinonaktifkan pada peramban Anda. Buka halaman menggunakan Chrome atau Safari standar.',
-    };
-  }
-
-  if (
-    combined.includes('auth/invalid-credential') ||
-    combined.includes('auth/wrong-password') ||
-    combined.includes('auth/user-not-found')
-  ) {
-    return {
-      code: rawCode || 'auth/invalid-credential',
-      message:
-        'Email atau kata sandi administrator tidak sesuai. Periksa kembali identitas Anda.',
-    };
-  }
-
-  if (combined.includes('auth/operation-not-allowed')) {
-    return {
-      code: 'auth/operation-not-allowed',
-      message:
-        'Metode masuk tersebut belum diaktifkan di Firebase Console. Gunakan tombol Masuk/Daftar dengan Akun Google.',
-    };
-  }
-
-  if (combined.includes('auth/network-request-failed')) {
-    return {
-      code: 'auth/network-request-failed',
-      message: 'Koneksi internet terputus. Periksa jaringan Anda lalu coba kembali.',
-    };
-  }
-
-  if (combined.includes('auth/too-many-requests')) {
-    return {
-      code: 'auth/too-many-requests',
-      message:
-        'Terlalu banyak percobaan masuk yang gagal. Tunggu beberapa saat sebelum mencoba lagi.',
-    };
-  }
-
-  const matchedCode = rawCode || (msg.match(/auth\/[a-z0-9-]+/i)?.[0] ?? null);
-  return {
-    code: matchedCode,
-    message: matchedCode
-      ? `Gagal memproses autentikasi (${matchedCode}). Silakan muat ulang halaman dan coba lagi.`
-      : 'Gagal memproses autentikasi. Silakan muat ulang halaman dan coba lagi.',
-  };
+  return 'Gagal memproses autentikasi. Silakan muat ulang halaman dan coba lagi.';
 }
 
 function buildStudentProfileFromDirectory(student: StudentDirectoryRecord): UserProfile {
@@ -247,12 +142,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     useState<AdminRegistrationSettingsRecord>(DEFAULT_REGISTRATION_SETTINGS);
   const [authReady, setAuthReady] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
-  const [authErrorCode, setAuthErrorCode] = useState<string | null>(null);
-
-  const setStructuredAuthError = useCallback((message: string | null, code: string | null = null) => {
-    setAuthError(message);
-    setAuthErrorCode(code);
-  }, []);
 
   // Subscribe to public registration policy (/adminSettings/registration)
   useEffect(() => {
@@ -504,14 +393,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 
   useEffect(() => {
-    // Capture any OAuth redirect completion or error on top-level domains (e.g., Vercel)
-    if (canUseAuthRedirect()) {
-      getRedirectResult(auth).catch((err) => {
-        const parsed = parseAuthError(err);
-        setStructuredAuthError(parsed.message, parsed.code);
-      });
-    }
-
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       setFirebaseUser(fbUser);
       if (!fbUser) {
@@ -536,13 +417,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     });
     return () => unsubscribe();
-  }, [loadAdminIdentity, restoreSavedStudentSession, setStructuredAuthError]);
+  }, [loadAdminIdentity, restoreSavedStudentSession]);
 
   const signInStudentWithNameAndToken = async (
     studentName: string,
     tokenInput: string
   ): Promise<boolean> => {
-    setStructuredAuthError(null, null);
+    setAuthError(null);
 
     const cleanName = clampStr(
       studentName.replace(/\s+/g, ' '),
@@ -747,19 +628,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const signInWithGoogle = async (): Promise<
-    'admin' | 'onboarding' | 'redirecting' | 'error'
-  > => {
-    setStructuredAuthError(null, null);
+  const signInWithGoogle = async (): Promise<'admin' | 'onboarding' | 'error'> => {
+    setAuthError(null);
     try {
       const cred = await signInWithPopup(auth, googleProvider);
       const user = cred.user;
       if (!user.emailVerified || !user.email) {
         await firebaseSignOut(auth);
         setFirebaseUser(null);
-        setStructuredAuthError(
-          'Akun Google harus memiliki alamat email yang terverifikasi untuk menjadi Admin Sekolah.',
-          'auth/email-unverified'
+        setAuthError(
+          'Akun Google harus memiliki alamat email yang terverifikasi untuk menjadi Admin Sekolah.'
         );
         return 'error';
       }
@@ -768,30 +646,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (status === 'onboarding') return 'onboarding';
       return 'error';
     } catch (err) {
-      const parsed = parseAuthError(err);
-      // On top-level hosts like Vercel (especially mobile / in-app browsers), automatically fall back to Redirect when popups are blocked
-      if (parsed.code === 'auth/popup-blocked' && canUseAuthRedirect()) {
-        try {
-          await signInWithRedirect(auth, googleProvider);
-          return 'redirecting';
-        } catch (redirectErr) {
-          const redParsed = parseAuthError(redirectErr);
-          setStructuredAuthError(redParsed.message, redParsed.code);
-          return 'error';
-        }
-      }
-      setStructuredAuthError(parsed.message, parsed.code);
+      setAuthError(translateAuthError(err));
       return 'error';
-    }
-  };
-
-  const signInWithGoogleRedirect = async (): Promise<void> => {
-    setStructuredAuthError(null, null);
-    try {
-      await signInWithRedirect(auth, googleProvider);
-    } catch (err) {
-      const parsed = parseAuthError(err);
-      setStructuredAuthError(parsed.message, parsed.code);
     }
   };
 
@@ -800,7 +656,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     schoolName: string;
     position: string;
   }): Promise<'active' | 'pending' | null> => {
-    setStructuredAuthError(null, null);
+    setAuthError(null);
     const fbUser = auth.currentUser;
     if (!fbUser || !fbUser.emailVerified || !fbUser.email) {
       setAuthError('Silakan masuk dengan Akun Google terverifikasi terlebih dahulu.');
@@ -913,7 +769,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     emailOrUsername: string,
     pinOrPassword: string
   ): Promise<boolean> => {
-    setStructuredAuthError(null, null);
+    setAuthError(null);
     const trimmed = emailOrUsername.trim();
     if (!trimmed.includes('@')) {
       setAuthError('Masukkan alamat email resmi Administrator.');
@@ -931,8 +787,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
       return true;
     } catch (err) {
-      const parsed = parseAuthError(err);
-      setStructuredAuthError(parsed.message, parsed.code);
+      setAuthError(translateAuthError(err));
       return false;
     }
   };
@@ -983,11 +838,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         registrationSettings,
         authReady,
         authError,
-        authErrorCode,
-        clearAuthError: () => setStructuredAuthError(null, null),
+        clearAuthError: () => setAuthError(null),
         signInStudentWithNameAndToken,
         signInWithGoogle,
-        signInWithGoogleRedirect,
         completeSchoolAdminRegistration,
         signInWithCredentials,
         refreshProfile,
