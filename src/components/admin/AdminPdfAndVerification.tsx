@@ -147,18 +147,74 @@ export const AdminPdfAndVerification: React.FC<AdminPdfAndVerificationProps> = (
   const [cropMessage, setCropMessage] = useState<string | null>(null);
 
   useEffect(() => {
+    const checkStaticFallback = async (
+      pdfUrl: string,
+      pagesCount: number,
+      visualsCount: number
+    ) => {
+      try {
+        const head = await fetch(pdfUrl, { method: 'HEAD' });
+        return {
+          available: head.ok,
+          renderedPagesCount: pagesCount,
+          extractedVisualsCount: visualsCount,
+        };
+      } catch {
+        return {
+          available: true,
+          renderedPagesCount: pagesCount,
+          extractedVisualsCount: visualsCount,
+        };
+      }
+    };
+
     fetch('/api/pdf/to1-status')
-      .then((r) => (r.ok ? r.json() : null))
+      .then(async (r) => {
+        const ct = r.headers.get('content-type') || '';
+        if (r.ok && ct.includes('application/json')) {
+          return r.json();
+        }
+        return checkStaticFallback(
+          TO1_SOURCE_PDF_URL,
+          20,
+          TO1_MTK_ASSETS.filter((a) => a.assetType !== 'page_render').length
+        );
+      })
       .then((data) => {
         if (data) setTo1Status(data);
       })
-      .catch(() => null);
+      .catch(async () => {
+        const fallback = await checkStaticFallback(
+          TO1_SOURCE_PDF_URL,
+          20,
+          TO1_MTK_ASSETS.filter((a) => a.assetType !== 'page_render').length
+        );
+        setTo1Status(fallback);
+      });
+
     fetch('/api/pdf/bindo2-status')
-      .then((r) => (r.ok ? r.json() : null))
+      .then(async (r) => {
+        const ct = r.headers.get('content-type') || '';
+        if (r.ok && ct.includes('application/json')) {
+          return r.json();
+        }
+        return checkStaticFallback(
+          BINDO2_SOURCE_PDF_URL,
+          19,
+          BINDO2_ASSETS.filter((a) => a.assetType !== 'page_render').length
+        );
+      })
       .then((data) => {
         if (data) setBindo2Status(data);
       })
-      .catch(() => null);
+      .catch(async () => {
+        const fallback = await checkStaticFallback(
+          BINDO2_SOURCE_PDF_URL,
+          19,
+          BINDO2_ASSETS.filter((a) => a.assetType !== 'page_render').length
+        );
+        setBindo2Status(fallback);
+      });
   }, []);
 
   const availableSubjects = Array.from(

@@ -13,6 +13,7 @@ import {
   Check,
   CheckCircle2,
   Copy,
+  ExternalLink,
   FileSpreadsheet,
   History,
   KeyRound,
@@ -33,6 +34,8 @@ import {
   auth,
   BOOTSTRAPPED_ADMIN_EMAIL,
   db,
+  FIREBASE_CONSOLE_AUTH_SETTINGS_URL,
+  FIREBASE_PROJECT_ID,
   handleFirestoreError,
   OperationType,
   recordAuditLog,
@@ -2331,6 +2334,30 @@ export const AdminStudentsAndAccess: React.FC<AdminStudentsAndAccessProps> = ({
                 >
                   {savingRegSettings ? 'Menyimpan...' : 'Simpan Kebijakan Pendaftaran'}
                 </button>
+              </div>
+
+              <div className="p-3.5 rounded-lg border border-slate-200 bg-slate-50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="text-xs text-slate-700 leading-relaxed">
+                  <span className="font-semibold text-slate-900">
+                    Catatan Publikasi ke Vercel / Domain Sendiri:
+                  </span>{' '}
+                  Jika aplikasi dijalankan di domain baru (mis.{' '}
+                  <code className="font-mono-tabular text-slate-900">*.vercel.app</code>), tambahkan
+                  domain tersebut 1 kali pada{' '}
+                  <strong>Authentication &rarr; Settings &rarr; Authorized domains</strong> di
+                  Firebase Console (Proyek:{' '}
+                  <code className="font-mono-tabular text-slate-900">{FIREBASE_PROJECT_ID}</code>)
+                  agar tombol Daftar/Masuk Google berfungsi.
+                </div>
+                <a
+                  href={FIREBASE_CONSOLE_AUTH_SETTINGS_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-xs font-semibold text-slate-800 whitespace-nowrap shrink-0"
+                >
+                  <span>Authorized Domains Firebase</span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
               </div>
             </form>
           )}
