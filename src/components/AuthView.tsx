@@ -3,8 +3,11 @@ import {
   AlertCircle,
   ArrowLeft,
   Building2,
+  Check,
   CheckCircle2,
   Clock,
+  Copy,
+  ExternalLink,
   KeyRound,
   LogIn,
   LogOut,
@@ -12,7 +15,12 @@ import {
   UserCheck,
   UserPlus,
 } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
+import { canUseAuthRedirect, useAuth } from '../context/AuthContext';
+import {
+  BOOTSTRAPPED_ADMIN_EMAIL,
+  FIREBASE_CONSOLE_AUTH_SETTINGS_URL,
+  FIREBASE_PROJECT_ID,
+} from '../lib/firebase';
 import { AppFooter } from './AppFooter';
 
 export type AuthPortalMode = 'student' | 'admin' | 'admin_register';
@@ -34,9 +42,11 @@ export const AuthView: React.FC<AuthViewProps> = ({
     adminOnboardingState,
     registrationSettings,
     authError,
+    authErrorCode,
     clearAuthError,
     signInStudentWithNameAndToken,
     signInWithGoogle,
+    signInWithGoogleRedirect,
     completeSchoolAdminRegistration,
     signInWithCredentials,
     refreshProfile,
@@ -44,6 +54,13 @@ export const AuthView: React.FC<AuthViewProps> = ({
   } = useAuth();
 
   const [busy, setBusy] = useState(false);
+  const [copiedDomain, setCopiedDomain] = useState(false);
+
+  const detectedHostname =
+    typeof window !== 'undefined' && window.location.hostname
+      ? window.location.hostname
+      : 'nama-aplikasi.vercel.app';
+  const redirectSupported = canUseAuthRedirect();
 
   // Student login fields (Name + Token only — no email)
   const [studentName, setStudentName] = useState('');
@@ -87,6 +104,26 @@ export const AuthView: React.FC<AuthViewProps> = ({
       }
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handleAdminGoogleRedirect = async () => {
+    clearAuthError();
+    setBusy(true);
+    try {
+      await signInWithGoogleRedirect();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleCopyHostname = async () => {
+    try {
+      await navigator.clipboard.writeText(detectedHostname);
+      setCopiedDomain(true);
+      window.setTimeout(() => setCopiedDomain(false), 2200);
+    } catch {
+      // ignore clipboard restriction
     }
   };
 
@@ -484,9 +521,81 @@ export const AuthView: React.FC<AuthViewProps> = ({
               </div>
 
               {authError && (
-                <div className="mt-5 p-3.5 rounded-lg border border-red-200 bg-red-50 text-sm text-red-800 flex items-start gap-2.5">
-                  <AlertCircle className="w-4 h-4 text-red-700 shrink-0 mt-0.5" />
-                  <span>{authError}</span>
+                <div className="mt-5 space-y-3">
+                  <div className="p-3.5 rounded-lg border border-red-200 bg-red-50 text-sm text-red-800 flex items-start gap-2.5">
+                    <AlertCircle className="w-4 h-4 text-red-700 shrink-0 mt-0.5" />
+                    <span>{authError}</span>
+                  </div>
+
+                  {authErrorCode === 'auth/unauthorized-domain' && (
+                    <div className="p-4 rounded-lg border border-amber-300 bg-amber-50/80 text-xs text-slate-800 space-y-3">
+                      <div className="font-bold text-amber-950 text-sm">
+                        Cara Mengaktifkan Login Google untuk Domain Vercel (Cukup 1 Kali):
+                      </div>
+
+                      <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                        <div className="flex-1 px-3 py-2 rounded-md bg-white border border-amber-300 font-mono-tabular text-xs font-semibold text-slate-900 select-all break-all">
+                          {detectedHostname}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleCopyHostname}
+                          className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-md bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 whitespace-nowrap shrink-0"
+                        >
+                          {copiedDomain ? (
+                            <>
+                              <Check className="w-3.5 h-3.5 text-emerald-400" />
+                              Domain Tersalin
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3.5 h-3.5" />
+                              1. Salin Domain Ini
+                            </>
+                          )}
+                        </button>
+                      </div>
+
+                      <ol className="list-decimal pl-4 space-y-1.5 text-slate-700 leading-relaxed">
+                        <li>
+                          Buka pengaturan Firebase proyek{' '}
+                          <code className="font-mono-tabular font-semibold text-slate-900">
+                            {FIREBASE_PROJECT_ID}
+                          </code>{' '}
+                          menggunakan akun pemilik (
+                          <span className="font-mono-tabular font-semibold text-slate-900">
+                            {BOOTSTRAPPED_ADMIN_EMAIL}
+                          </span>
+                          ).
+                        </li>
+                        <li>
+                          Pada tab <strong>Settings &rarr; Authorized domains</strong> (Domain
+                          resmi), klik <strong>Add domain</strong> lalu tempel{' '}
+                          <code className="font-mono-tabular font-semibold text-slate-900">
+                            {detectedHostname}
+                          </code>{' '}
+                          dan simpan.
+                        </li>
+                        <li>
+                          Kembali ke halaman ini, lalu klik tombol{' '}
+                          <strong>Daftar / Masuk dengan Akun Google</strong> di bawah (tidak perlu
+                          deploy ulang di Vercel).
+                        </li>
+                      </ol>
+
+                      <div className="pt-1">
+                        <a
+                          href={FIREBASE_CONSOLE_AUTH_SETTINGS_URL}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md bg-amber-900 text-white text-xs font-semibold hover:bg-amber-950 whitespace-nowrap"
+                        >
+                          <span>2. Buka Authorized Domains di Firebase Console</span>
+                          <ExternalLink className="w-3.5 h-3.5" />
+                        </a>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -606,19 +715,32 @@ export const AuthView: React.FC<AuthViewProps> = ({
                       Anda sudah terdaftar sebelumnya, gunakan menu Masuk Admin.
                     </div>
                   ) : (
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={handleAdminGoogleSignIn}
-                      className="w-full min-h-[48px] px-5 py-3 rounded-lg bg-sky-700 text-white text-sm font-semibold hover:bg-sky-800 disabled:opacity-60 transition-colors flex items-center justify-center gap-2.5 whitespace-nowrap shrink-0"
-                    >
-                      <UserPlus className="w-5 h-5" />
-                      <span>
-                        {busy
-                          ? 'Menghubungkan Akun Google...'
-                          : 'Daftar dengan Akun Google / Belajar.id'}
-                      </span>
-                    </button>
+                    <div className="space-y-2.5">
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={handleAdminGoogleSignIn}
+                        className="w-full min-h-[48px] px-5 py-3 rounded-lg bg-sky-700 text-white text-sm font-semibold hover:bg-sky-800 disabled:opacity-60 transition-colors flex items-center justify-center gap-2.5 whitespace-nowrap shrink-0"
+                      >
+                        <UserPlus className="w-5 h-5" />
+                        <span>
+                          {busy
+                            ? 'Menghubungkan Akun Google...'
+                            : 'Daftar dengan Akun Google / Belajar.id'}
+                        </span>
+                      </button>
+
+                      {redirectSupported && (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={handleAdminGoogleRedirect}
+                          className="w-full py-2 px-3 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-medium text-slate-700 transition-colors"
+                        >
+                          Pop-up tidak muncul di HP/peramban? Daftar via Mode Alih Halaman
+                        </button>
+                      )}
+                    </div>
                   )}
 
                   <div className="pt-3 border-t border-slate-100 text-center text-xs text-slate-600">
@@ -637,17 +759,30 @@ export const AuthView: React.FC<AuthViewProps> = ({
                 </div>
               ) : (
                 <div className="mt-6 space-y-4">
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={handleAdminGoogleSignIn}
-                    className="w-full min-h-[48px] px-5 py-3 rounded-lg bg-sky-700 text-white text-base font-semibold hover:bg-sky-800 disabled:opacity-60 transition-colors flex items-center justify-center gap-2.5 whitespace-nowrap shrink-0"
-                  >
-                    <LogIn className="w-5 h-5" />
-                    <span>
-                      {busy ? 'Memproses Autentikasi...' : 'Masuk Admin dengan Google'}
-                    </span>
-                  </button>
+                  <div className="space-y-2.5">
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={handleAdminGoogleSignIn}
+                      className="w-full min-h-[48px] px-5 py-3 rounded-lg bg-sky-700 text-white text-base font-semibold hover:bg-sky-800 disabled:opacity-60 transition-colors flex items-center justify-center gap-2.5 whitespace-nowrap shrink-0"
+                    >
+                      <LogIn className="w-5 h-5" />
+                      <span>
+                        {busy ? 'Memproses Autentikasi...' : 'Masuk Admin dengan Google'}
+                      </span>
+                    </button>
+
+                    {redirectSupported && (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={handleAdminGoogleRedirect}
+                        className="w-full py-2 px-3 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-medium text-slate-700 transition-colors"
+                      >
+                        Pop-up tidak muncul di HP/peramban? Masuk via Mode Alih Halaman
+                      </button>
+                    )}
+                  </div>
 
                   <div className="p-3.5 rounded-lg border border-slate-200 bg-slate-50 flex items-center justify-between gap-3">
                     <div className="text-xs text-slate-600">
